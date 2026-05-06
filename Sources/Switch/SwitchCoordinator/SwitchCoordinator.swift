@@ -313,6 +313,64 @@ public struct SwitchCoordinator: Sendable {
         }
     }
 
+    public func awaitCompletion(
+        _ session: SwitchSession,
+        timeoutSeconds: TimeInterval = 180,
+        pollIntervalSeconds: TimeInterval = 2,
+        refreshSnapshot: @escaping @Sendable (Account) async throws -> QuotaSnapshot?
+    ) async -> SwitchOutcome {
+        let deadline = now().addingTimeInterval(timeoutSeconds)
+        var lastMessage = "等待 Codex 登录完成"
+
+        while now() < deadline {
+            if Task.isCancelled {
+                return await complete(
+                    session,
+                    officialFlowConfirmedByUser: false,
+                    refreshSnapshot: refreshSnapshot
+                )
+            }
+
+            do {
+                let verification = try await provider.verifySwitch(
+                    to: session.preflight.targetAccount,
+                    userConfirmedOfficialFlow: true
+                )
+                if verification.verified {
+                    return await complete(
+                        session,
+                        officialFlowConfirmedByUser: true,
+                        refreshSnapshot: refreshSnapshot
+                    )
+                }
+                if !verification.message.isEmpty {
+                    lastMessage = verification.message
+                }
+            } catch {
+                lastMessage = error.localizedDescription
+            }
+
+            let intervalNanoseconds = UInt64(max(pollIntervalSeconds, 0.5) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: intervalNanoseconds)
+        }
+
+        let message = "等待 Codex 登录超时：\(lastMessage)"
+        try? recordFinalEvent(
+            preflight: session.preflight,
+            result: .failed,
+            message: message,
+            providerName: session.launch.providerName,
+            createdAt: now()
+        )
+        return SwitchOutcome(
+            result: .failed,
+            targetAccount: session.preflight.targetAccount,
+            snapshot: nil,
+            phases: session.phases + [.verifying, .failed],
+            message: message
+        )
+    }
+
     public func switchAccount(
         targetAccountID: UUID,
         reason: SwitchReason = .userRequested,

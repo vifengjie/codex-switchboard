@@ -138,14 +138,44 @@ final class SwitchCoordinatorTests: XCTestCase {
         XCTAssertEqual(try fixture.switchEvents.recent(limit: 10).first?.result, .staleSucceeded)
     }
 
-    private func makeFixture(now: Date = Date(timeIntervalSince1970: 1_000)) throws -> Fixture {
+    func testAwaitCompletionPollsUntilProviderReportsLoggedIn() async throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let provider = PollingMockSwitchProvider(succeedsOnAttempt: 3)
+        let fixture = try makeFixture(now: now, provider: provider)
+        let target = Account(alias: "target", authStatus: .active)
+        try fixture.accounts.upsert(target)
+
+        let preflight = try fixture.coordinator.preflight(targetAccountID: target.id)
+        let session = try await fixture.coordinator.launch(preflight)
+        let outcome = await fixture.coordinator.awaitCompletion(
+            session,
+            timeoutSeconds: 5,
+            pollIntervalSeconds: 0.01,
+            refreshSnapshot: { account in
+                QuotaSnapshot(
+                    accountAlias: account.alias,
+                    capturedAt: now,
+                    fiveHourRemainingPercent: 61,
+                    weeklyRemainingPercent: 82,
+                    confidence: .observed
+                )
+            }
+        )
+
+        XCTAssertEqual(outcome.result, .success)
+        XCTAssertEqual(outcome.snapshot?.fiveHourRemainingPercent, 61)
+    }
+
+    private func makeFixture(
+        now: Date = Date(timeIntervalSince1970: 1_000),
+        provider: any SwitchProvider = MockSwitchProvider()
+    ) throws -> Fixture {
         let store = SQLiteStore(databaseURL: makeTemporaryDatabaseURL())
         try store.migrate()
         let accounts = SQLiteAccountRepository(store: store)
         let snapshots = SQLiteSnapshotRepository(store: store)
         let switchEvents = SQLiteSwitchEventRepository(store: store)
         let audits = SQLiteAuditRepository(store: store)
-        let provider = MockSwitchProvider()
         let coordinator = SwitchCoordinator(
             accountRepository: accounts,
             snapshotRepository: snapshots,
@@ -193,6 +223,45 @@ private struct MockSwitchProvider: SwitchProvider {
         SwitchVerification(
             verified: userConfirmedOfficialFlow,
             message: userConfirmedOfficialFlow ? "verified \(target.alias)" : "not verified"
+        )
+    }
+}
+
+private actor PollingVerifierState {
+    private var attempts = 0
+    let succeedsOnAttempt: Int
+
+    init(succeedsOnAttempt: Int) {
+        self.succeedsOnAttempt = succeedsOnAttempt
+    }
+
+    func nextAttemptVerified() -> Bool {
+        attempts += 1
+        return attempts >= succeedsOnAttempt
+    }
+}
+
+private struct PollingMockSwitchProvider: SwitchProvider {
+    var providerName = "polling_mock_provider"
+    private let state: PollingVerifierState
+
+    init(succeedsOnAttempt: Int) {
+        self.state = PollingVerifierState(succeedsOnAttempt: succeedsOnAttempt)
+    }
+
+    func launchSwitchFlow(from source: Account?, to target: Account) async throws -> SwitchProviderLaunch {
+        SwitchProviderLaunch(
+            providerName: providerName,
+            openedExternalFlow: true,
+            instructions: ["polling launch \(target.alias)"]
+        )
+    }
+
+    func verifySwitch(to target: Account, userConfirmedOfficialFlow: Bool) async throws -> SwitchVerification {
+        let verified = await state.nextAttemptVerified()
+        return SwitchVerification(
+            verified: verified,
+            message: verified ? "verified \(target.alias)" : "waiting"
         )
     }
 }

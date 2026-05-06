@@ -35,6 +35,7 @@ final class ManagementViewModel: ObservableObject {
     private let diagnosticsExporter = DiagnosticsExporter()
     private let accountManager: AccountManager
     private let switchCoordinator: SwitchCoordinator
+    private var activeSwitchTask: Task<Void, Never>?
 
     init() {
         let resolvedStore: SQLiteStore
@@ -223,7 +224,8 @@ final class ManagementViewModel: ObservableObject {
                 let session = try await switchCoordinator.launch(preflight)
                 pendingSwitchPreflight = nil
                 activeSwitchSession = session
-                statusMessage = "官方流程已打开，完成后请回到本窗口确认"
+                statusMessage = "Codex 登录流程已启动，正在等待登录完成..."
+                beginAwaitingActiveSwitch(session)
             } catch {
                 pendingSwitchPreflight = nil
                 reload(statusMessage: "启动切换失败：\(error.localizedDescription)")
@@ -231,24 +233,11 @@ final class ManagementViewModel: ObservableObject {
         }
     }
 
-    func completeActiveSwitchSession(userConfirmed: Bool) {
-        guard let session = activeSwitchSession else {
-            return
-        }
-        statusMessage = userConfirmed ? "正在校验并刷新目标账号快照..." : "正在取消切换..."
-        Task {
-            let outcome = await switchCoordinator.complete(
-                session,
-                officialFlowConfirmedByUser: userConfirmed,
-                refreshSnapshot: { account in
-                    try await Task.detached(priority: .utility) {
-                        try await LocalQuotaRefreshService.collectLatestSnapshot(accountAlias: account.alias)
-                    }.value
-                }
-            )
-            activeSwitchSession = nil
-            reload(statusMessage: outcome.message)
-        }
+    func cancelActiveSwitchSession() {
+        activeSwitchTask?.cancel()
+        activeSwitchTask = nil
+        activeSwitchSession = nil
+        statusMessage = "切换等待已取消"
     }
 
     func exportUsageEvents(format: UsageEventExportFormat) {
@@ -434,5 +423,30 @@ final class ManagementViewModel: ObservableObject {
             return "\(short) (\(build))"
         }
         return "dev"
+    }
+
+    private func beginAwaitingActiveSwitch(_ session: SwitchSession) {
+        activeSwitchTask?.cancel()
+        activeSwitchTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+            let outcome = await switchCoordinator.awaitCompletion(
+                session,
+                refreshSnapshot: { account in
+                    try await Task.detached(priority: .utility) {
+                        try await LocalQuotaRefreshService.collectLatestSnapshot(accountAlias: account.alias)
+                    }.value
+                }
+            )
+            guard !Task.isCancelled else {
+                return
+            }
+            await MainActor.run {
+                self.activeSwitchTask = nil
+                self.activeSwitchSession = nil
+                self.reload(statusMessage: outcome.message)
+            }
+        }
     }
 }

@@ -84,11 +84,8 @@ struct ManagementRootView: View {
         .sheet(item: $viewModel.activeSwitchSession) { session in
             SwitchCompletionSheet(
                 session: session,
-                completeAction: {
-                    viewModel.completeActiveSwitchSession(userConfirmed: true)
-                },
                 cancelAction: {
-                    viewModel.completeActiveSwitchSession(userConfirmed: false)
+                    viewModel.cancelActiveSwitchSession()
                 }
             )
         }
@@ -593,12 +590,11 @@ private struct SwitchConfirmationSheet: View {
 
 private struct SwitchCompletionSheet: View {
     let session: SwitchSession
-    let completeAction: () -> Void
     let cancelAction: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("完成官方流程")
+            Text("正在切换 Codex 登录")
                 .font(.headline)
             Text("目标账号：\(session.preflight.targetAccount.alias)")
 
@@ -609,11 +605,11 @@ private struct SwitchCompletionSheet: View {
             }
             .foregroundStyle(.secondary)
 
+            ProgressView("正在检测 Codex 登录状态...")
+
             HStack {
                 Button("取消切换", action: cancelAction)
                 Spacer()
-                Button("我已完成切换", action: completeAction)
-                    .keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)
