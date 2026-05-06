@@ -80,10 +80,10 @@ final class ManagementViewModel: ObservableObject {
             snapshotRepository: resolvedSnapshotRepository,
             switchEventRepository: resolvedSwitchEventRepository,
             auditRepository: resolvedAuditRepository,
-            provider: OfficialLoginSwitchProvider(
-                openURL: { url in
+            provider: CodexCLISwitchProvider(
+                openScript: { scriptURL in
                     await MainActor.run {
-                        NSWorkspace.shared.open(url)
+                        NSWorkspace.shared.open(scriptURL)
                     }
                 }
             )
