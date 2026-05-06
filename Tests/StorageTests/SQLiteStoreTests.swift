@@ -61,10 +61,14 @@ final class SQLiteStoreTests: XCTestCase {
             provider: .chatgpt,
             workspaceName: "Business-A",
             emailMasked: "a***@example.com",
+            loginIdentifierMasked: "owner@example.com",
             planType: .business,
             seatType: .codex,
             authMethod: .chatgpt,
             authStatus: .active,
+            passwordRequired: true,
+            verificationMethods: [.emailOTP, .authenticatorTOTP],
+            verificationHint: "邮箱验证码 + Google Authenticator",
             keychainRef: "codex-quota-manager.account.primary",
             enabled: true,
             priority: 10,
@@ -78,11 +82,15 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(accounts.map(\.alias), ["主账号", "备用账号"])
         XCTAssertEqual(accounts.first?.workspaceName, "Business-A")
         XCTAssertEqual(accounts.first?.emailMasked, "a***@example.com")
+        XCTAssertEqual(accounts.first?.loginIdentifierMasked, "owner@example.com")
         XCTAssertEqual(accounts.first?.provider, .chatgpt)
         XCTAssertEqual(accounts.first?.planType, .business)
         XCTAssertEqual(accounts.first?.seatType, .codex)
         XCTAssertEqual(accounts.first?.authMethod, .chatgpt)
         XCTAssertEqual(accounts.first?.authStatus, .active)
+        XCTAssertEqual(accounts.first?.passwordRequired, true)
+        XCTAssertEqual(accounts.first?.verificationMethods, [.emailOTP, .authenticatorTOTP])
+        XCTAssertEqual(accounts.first?.verificationHint, "邮箱验证码 + Google Authenticator")
         XCTAssertEqual(accounts.first?.keychainRef, "codex-quota-manager.account.primary")
         XCTAssertEqual(accounts.first?.lastSwitchedAt?.timeIntervalSince1970, 300)
     }

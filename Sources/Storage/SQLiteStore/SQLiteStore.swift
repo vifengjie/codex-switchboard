@@ -46,10 +46,14 @@ public struct SQLiteStore: Sendable {
                     provider TEXT NOT NULL DEFAULT 'unknown',
                     workspace_name TEXT,
                     email_masked TEXT,
+                    login_identifier_masked TEXT,
                     plan_type TEXT NOT NULL,
                     seat_type TEXT NOT NULL DEFAULT 'unknown',
                     auth_method TEXT NOT NULL DEFAULT 'unknown',
                     auth_status TEXT NOT NULL,
+                    password_required INTEGER NOT NULL DEFAULT 0,
+                    verification_methods TEXT NOT NULL DEFAULT '',
+                    verification_hint TEXT,
                     keychain_ref TEXT,
                     enabled INTEGER NOT NULL,
                     priority INTEGER NOT NULL,
@@ -167,6 +171,8 @@ public struct SQLiteStore: Sendable {
                     VALUES (5, strftime('%s', 'now'));
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
                     VALUES (6, strftime('%s', 'now'));
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (7, strftime('%s', 'now'));
                 """
             )
             try ensureAccountColumns(db)
@@ -204,8 +210,12 @@ public struct SQLiteStore: Sendable {
         let existingColumns = try accountColumnNames(db)
         let additions = [
             ("provider", "provider TEXT NOT NULL DEFAULT 'unknown'"),
+            ("login_identifier_masked", "login_identifier_masked TEXT"),
             ("seat_type", "seat_type TEXT NOT NULL DEFAULT 'unknown'"),
             ("auth_method", "auth_method TEXT NOT NULL DEFAULT 'unknown'"),
+            ("password_required", "password_required INTEGER NOT NULL DEFAULT 0"),
+            ("verification_methods", "verification_methods TEXT NOT NULL DEFAULT ''"),
+            ("verification_hint", "verification_hint TEXT"),
             ("keychain_ref", "keychain_ref TEXT"),
             ("last_switched_at", "last_switched_at REAL")
         ]
@@ -566,8 +576,9 @@ public struct SQLiteAccountRepository: Sendable {
         try store.withDatabase { db in
             let sql = """
                 SELECT account_id, alias, provider, workspace_name, email_masked,
-                       plan_type, seat_type, auth_method, auth_status, keychain_ref,
-                       enabled, priority, last_switched_at
+                       login_identifier_masked, plan_type, seat_type, auth_method, auth_status,
+                       password_required, verification_methods, verification_hint,
+                       keychain_ref, enabled, priority, last_switched_at
                 FROM accounts
                 ORDER BY enabled DESC, priority DESC, alias ASC
                 """
@@ -591,8 +602,9 @@ public struct SQLiteAccountRepository: Sendable {
         try store.withDatabase { db in
             let sql = """
                 SELECT account_id, alias, provider, workspace_name, email_masked,
-                       plan_type, seat_type, auth_method, auth_status, keychain_ref,
-                       enabled, priority, last_switched_at
+                       login_identifier_masked, plan_type, seat_type, auth_method, auth_status,
+                       password_required, verification_methods, verification_hint,
+                       keychain_ref, enabled, priority, last_switched_at
                 FROM accounts
                 WHERE account_id = ?
                 LIMIT 1
@@ -619,20 +631,24 @@ public struct SQLiteAccountRepository: Sendable {
             let sql = """
                 INSERT INTO accounts(
                     account_id, alias, provider, workspace_name, email_masked,
-                    plan_type, seat_type, auth_method, auth_status, keychain_ref,
-                    enabled, priority, last_switched_at,
-                    created_at, updated_at
+                    login_identifier_masked, plan_type, seat_type, auth_method, auth_status,
+                    password_required, verification_methods, verification_hint,
+                    keychain_ref, enabled, priority, last_switched_at, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id) DO UPDATE SET
                     alias = excluded.alias,
                     provider = excluded.provider,
                     workspace_name = excluded.workspace_name,
                     email_masked = excluded.email_masked,
+                    login_identifier_masked = excluded.login_identifier_masked,
                     plan_type = excluded.plan_type,
                     seat_type = excluded.seat_type,
                     auth_method = excluded.auth_method,
                     auth_status = excluded.auth_status,
+                    password_required = excluded.password_required,
+                    verification_methods = excluded.verification_methods,
+                    verification_hint = excluded.verification_hint,
                     keychain_ref = excluded.keychain_ref,
                     enabled = excluded.enabled,
                     priority = excluded.priority,
@@ -653,16 +669,20 @@ public struct SQLiteAccountRepository: Sendable {
             bindText(statement, index: 3, value: account.provider.rawValue)
             bindOptionalText(statement, index: 4, value: account.workspaceName)
             bindOptionalText(statement, index: 5, value: account.emailMasked)
-            bindText(statement, index: 6, value: account.planType.rawValue)
-            bindText(statement, index: 7, value: account.seatType.rawValue)
-            bindText(statement, index: 8, value: account.authMethod.rawValue)
-            bindText(statement, index: 9, value: account.authStatus.rawValue)
-            bindOptionalText(statement, index: 10, value: account.keychainRef)
-            bindBool(statement, index: 11, value: account.enabled)
-            bindInt64(statement, index: 12, value: Int64(account.priority))
-            bindOptionalDouble(statement, index: 13, value: account.lastSwitchedAt?.timeIntervalSince1970)
-            bindDouble(statement, index: 14, value: now)
-            bindDouble(statement, index: 15, value: now)
+            bindOptionalText(statement, index: 6, value: account.loginIdentifierMasked)
+            bindText(statement, index: 7, value: account.planType.rawValue)
+            bindText(statement, index: 8, value: account.seatType.rawValue)
+            bindText(statement, index: 9, value: account.authMethod.rawValue)
+            bindText(statement, index: 10, value: account.authStatus.rawValue)
+            bindBool(statement, index: 11, value: account.passwordRequired)
+            bindText(statement, index: 12, value: encodeVerificationMethods(account.verificationMethods))
+            bindOptionalText(statement, index: 13, value: account.verificationHint)
+            bindOptionalText(statement, index: 14, value: account.keychainRef)
+            bindBool(statement, index: 15, value: account.enabled)
+            bindInt64(statement, index: 16, value: Int64(account.priority))
+            bindOptionalDouble(statement, index: 17, value: account.lastSwitchedAt?.timeIntervalSince1970)
+            bindDouble(statement, index: 18, value: now)
+            bindDouble(statement, index: 19, value: now)
 
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 throw SQLiteStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
@@ -693,10 +713,10 @@ public struct SQLiteAccountRepository: Sendable {
         let idRaw = columnText(statement, index: 0) ?? UUID().uuidString
         let id = UUID(uuidString: idRaw) ?? UUID()
         let providerRaw = columnText(statement, index: 2) ?? AccountProvider.unknown.rawValue
-        let planTypeRaw = columnText(statement, index: 5) ?? PlanType.unknown.rawValue
-        let seatTypeRaw = columnText(statement, index: 6) ?? SeatType.unknown.rawValue
-        let authMethodRaw = columnText(statement, index: 7) ?? AuthMethod.unknown.rawValue
-        let authStatusRaw = columnText(statement, index: 8) ?? AuthStatus.unknown.rawValue
+        let planTypeRaw = columnText(statement, index: 6) ?? PlanType.unknown.rawValue
+        let seatTypeRaw = columnText(statement, index: 7) ?? SeatType.unknown.rawValue
+        let authMethodRaw = columnText(statement, index: 8) ?? AuthMethod.unknown.rawValue
+        let authStatusRaw = columnText(statement, index: 9) ?? AuthStatus.unknown.rawValue
 
         return Account(
             id: id,
@@ -704,15 +724,32 @@ public struct SQLiteAccountRepository: Sendable {
             provider: AccountProvider(rawValue: providerRaw) ?? .unknown,
             workspaceName: columnText(statement, index: 3),
             emailMasked: columnText(statement, index: 4),
+            loginIdentifierMasked: columnText(statement, index: 5),
             planType: PlanType(rawValue: planTypeRaw) ?? .unknown,
             seatType: SeatType(rawValue: seatTypeRaw) ?? .unknown,
             authMethod: AuthMethod(rawValue: authMethodRaw) ?? .unknown,
             authStatus: AuthStatus(rawValue: authStatusRaw) ?? .unknown,
-            keychainRef: columnText(statement, index: 9),
-            enabled: sqlite3_column_int(statement, 10) == 1,
-            priority: Int(sqlite3_column_int64(statement, 11)),
-            lastSwitchedAt: columnOptionalDate(statement, index: 12)
+            passwordRequired: sqlite3_column_int(statement, 10) == 1,
+            verificationMethods: decodeVerificationMethods(columnText(statement, index: 11)),
+            verificationHint: columnText(statement, index: 12),
+            keychainRef: columnText(statement, index: 13),
+            enabled: sqlite3_column_int(statement, 14) == 1,
+            priority: Int(sqlite3_column_int64(statement, 15)),
+            lastSwitchedAt: columnOptionalDate(statement, index: 16)
         )
+    }
+
+    private func encodeVerificationMethods(_ methods: [VerificationMethod]) -> String {
+        methods.map(\.rawValue).joined(separator: ",")
+    }
+
+    private func decodeVerificationMethods(_ rawValue: String?) -> [VerificationMethod] {
+        guard let rawValue, !rawValue.isEmpty else {
+            return []
+        }
+        return rawValue
+            .split(separator: ",")
+            .compactMap { VerificationMethod(rawValue: String($0)) }
     }
 }
 

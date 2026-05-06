@@ -46,6 +46,23 @@ final class SwitchCoordinatorTests: XCTestCase {
         XCTAssertEqual(preflight.privacyNotice.contains("不会读取、复制或替换 Codex auth 文件"), true)
     }
 
+    func testPreflightWarnsWhenAdditionalVerificationIsRequired() throws {
+        let fixture = try makeFixture()
+        let target = Account(
+            alias: "target",
+            authStatus: .active,
+            verificationMethods: [.emailOTP, .authenticatorTOTP],
+            verificationHint: "邮箱验证码 + Google Authenticator"
+        )
+        try fixture.accounts.upsert(target)
+
+        let preflight = try fixture.coordinator.preflight(targetAccountID: target.id)
+
+        XCTAssertEqual(preflight.warnings, [.additionalVerificationRequired, .snapshotMissing])
+        XCTAssertEqual(preflight.targetAccount.verificationMethods, [.emailOTP, .authenticatorTOTP])
+        XCTAssertEqual(preflight.targetAccount.verificationHint, "邮箱验证码 + Google Authenticator")
+    }
+
     func testSwitchCancellationWritesSwitchAndAuditEvents() async throws {
         let fixture = try makeFixture()
         let target = Account(alias: "target", authStatus: .active)

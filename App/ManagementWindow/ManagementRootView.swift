@@ -167,8 +167,14 @@ private struct AccountsTab: View {
                 TableColumn("邮箱") { account in
                     Text(account.emailMasked ?? "--")
                 }
+                TableColumn("登录标识") { account in
+                    Text(account.loginIdentifierMasked ?? "--")
+                }
                 TableColumn("Plan") { account in
                     Text(account.planType.rawValue)
+                }
+                TableColumn("二次验证") { account in
+                    Text(verificationSummary(for: account))
                 }
                 TableColumn("授权") { account in
                     Text(account.authStatus.rawValue)
@@ -198,6 +204,22 @@ private struct AccountsTab: View {
         }
         .padding(20)
     }
+
+    private func verificationSummary(for account: Account) -> String {
+        let labels = account.verificationMethods.map { method in
+            switch method {
+            case .emailOTP:
+                return "邮箱"
+            case .authenticatorTOTP:
+                return "Authenticator"
+            case .smsOTP:
+                return "短信"
+            case .unknown:
+                return "其他"
+            }
+        }
+        return labels.isEmpty ? "--" : labels.joined(separator: " + ")
+    }
 }
 
 private struct AccountEditorDraft: Identifiable {
@@ -207,10 +229,14 @@ private struct AccountEditorDraft: Identifiable {
     var provider: AccountProvider
     var workspaceName: String
     var emailMasked: String
+    var loginIdentifierMasked: String
     var planType: PlanType
     var seatType: SeatType
     var authMethod: AuthMethod
     var authStatus: AuthStatus
+    var passwordRequired: Bool
+    var verificationMethods: Set<VerificationMethod>
+    var verificationHint: String
     var keychainRef: String
     var enabled: Bool
     var priority: Int
@@ -224,10 +250,14 @@ private struct AccountEditorDraft: Identifiable {
             provider: .chatgpt,
             workspaceName: "",
             emailMasked: "",
+            loginIdentifierMasked: "",
             planType: .unknown,
             seatType: .unknown,
             authMethod: .unknown,
             authStatus: .unknown,
+            passwordRequired: false,
+            verificationMethods: [],
+            verificationHint: "",
             keychainRef: "",
             enabled: true,
             priority: max(0, 100 - nextIndex),
@@ -242,10 +272,14 @@ private struct AccountEditorDraft: Identifiable {
         self.provider = account.provider
         self.workspaceName = account.workspaceName ?? ""
         self.emailMasked = account.emailMasked ?? ""
+        self.loginIdentifierMasked = account.loginIdentifierMasked ?? ""
         self.planType = account.planType
         self.seatType = account.seatType
         self.authMethod = account.authMethod
         self.authStatus = account.authStatus
+        self.passwordRequired = account.passwordRequired
+        self.verificationMethods = Set(account.verificationMethods)
+        self.verificationHint = account.verificationHint ?? ""
         self.keychainRef = account.keychainRef ?? ""
         self.enabled = account.enabled
         self.priority = account.priority
@@ -259,10 +293,14 @@ private struct AccountEditorDraft: Identifiable {
         provider: AccountProvider,
         workspaceName: String,
         emailMasked: String,
+        loginIdentifierMasked: String,
         planType: PlanType,
         seatType: SeatType,
         authMethod: AuthMethod,
         authStatus: AuthStatus,
+        passwordRequired: Bool,
+        verificationMethods: Set<VerificationMethod>,
+        verificationHint: String,
         keychainRef: String,
         enabled: Bool,
         priority: Int,
@@ -274,10 +312,14 @@ private struct AccountEditorDraft: Identifiable {
         self.provider = provider
         self.workspaceName = workspaceName
         self.emailMasked = emailMasked
+        self.loginIdentifierMasked = loginIdentifierMasked
         self.planType = planType
         self.seatType = seatType
         self.authMethod = authMethod
         self.authStatus = authStatus
+        self.passwordRequired = passwordRequired
+        self.verificationMethods = verificationMethods
+        self.verificationHint = verificationHint
         self.keychainRef = keychainRef
         self.enabled = enabled
         self.priority = priority
@@ -295,10 +337,14 @@ private struct AccountEditorDraft: Identifiable {
             provider: provider,
             workspaceName: optionalText(workspaceName),
             emailMasked: optionalText(emailMasked),
+            loginIdentifierMasked: optionalText(loginIdentifierMasked),
             planType: planType,
             seatType: seatType,
             authMethod: authMethod,
             authStatus: authStatus,
+            passwordRequired: passwordRequired,
+            verificationMethods: verificationMethods.sorted { $0.rawValue < $1.rawValue },
+            verificationHint: optionalText(verificationHint),
             keychainRef: optionalText(keychainRef),
             enabled: enabled,
             priority: priority,
@@ -336,6 +382,7 @@ private struct AccountEditorSheet: View {
                 TextField("别名", text: $draft.alias)
                 TextField("Workspace", text: $draft.workspaceName)
                 TextField("邮箱（脱敏）", text: $draft.emailMasked)
+                TextField("登录标识（脱敏）", text: $draft.loginIdentifierMasked)
                 Picker("Provider", selection: $draft.provider) {
                     ForEach(AccountProvider.allCases, id: \.self) { value in
                         Text(value.rawValue).tag(value)
@@ -361,6 +408,16 @@ private struct AccountEditorSheet: View {
                         Text(value.rawValue).tag(value)
                     }
                 }
+                Toggle("需要密码", isOn: $draft.passwordRequired)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("二次验证")
+                        .font(.subheadline)
+                    Toggle("邮箱验证码", isOn: verificationMethodBinding(.emailOTP))
+                    Toggle("Authenticator 动态码", isOn: verificationMethodBinding(.authenticatorTOTP))
+                    Toggle("短信验证码", isOn: verificationMethodBinding(.smsOTP))
+                    Toggle("其他验证码", isOn: verificationMethodBinding(.unknown))
+                }
+                TextField("二次验证提示", text: $draft.verificationHint)
                 TextField("Keychain 引用", text: $draft.keychainRef)
                 Stepper("优先级：\(draft.priority)", value: $draft.priority, in: 0...999, step: 1)
                 Toggle("启用", isOn: $draft.enabled)
@@ -379,6 +436,19 @@ private struct AccountEditorSheet: View {
         .padding(20)
         .frame(width: 460)
     }
+
+    private func verificationMethodBinding(_ method: VerificationMethod) -> Binding<Bool> {
+        Binding(
+            get: { draft.verificationMethods.contains(method) },
+            set: { enabled in
+                if enabled {
+                    draft.verificationMethods.insert(method)
+                } else {
+                    draft.verificationMethods.remove(method)
+                }
+            }
+        )
+    }
 }
 
 private struct SwitchConfirmationSheet: View {
@@ -396,6 +466,10 @@ private struct SwitchConfirmationSheet: View {
                 Text("目标账号：\(preflight.targetAccount.alias)")
                 Text("目标额度：\(quotaLine(preflight.targetSnapshot))")
                 Text("授权状态：\(preflight.targetAccount.authStatus.rawValue)")
+                Text("登录资料：\(credentialSummary(preflight.targetAccount))")
+                if let verificationSummary = verificationSummary(preflight.targetAccount) {
+                    Text("二次验证：\(verificationSummary)")
+                }
             }
 
             if !preflight.warnings.isEmpty {
@@ -447,7 +521,42 @@ private struct SwitchConfirmationSheet: View {
             return "目标账号暂无额度快照，切换后会强制刷新。"
         case .snapshotStale:
             return "目标账号快照已过期，切换后会强制刷新。"
+        case .additionalVerificationRequired:
+            return "该账号需要额外验证码，请提前准备邮箱或 Authenticator。"
         }
+    }
+
+    private func credentialSummary(_ account: Account) -> String {
+        var parts: [String] = []
+        if let loginIdentifierMasked = account.loginIdentifierMasked, !loginIdentifierMasked.isEmpty {
+            parts.append(loginIdentifierMasked)
+        }
+        if account.passwordRequired {
+            parts.append("需要密码")
+        }
+        return parts.isEmpty ? "--" : parts.joined(separator: " / ")
+    }
+
+    private func verificationSummary(_ account: Account) -> String? {
+        let methods = account.verificationMethods.map { method in
+            switch method {
+            case .emailOTP:
+                return "邮箱验证码"
+            case .authenticatorTOTP:
+                return "Authenticator 动态码"
+            case .smsOTP:
+                return "短信验证码"
+            case .unknown:
+                return "其他验证码"
+            }
+        }
+        guard !methods.isEmpty else {
+            return nil
+        }
+        if let verificationHint = account.verificationHint, !verificationHint.isEmpty {
+            return "\(methods.joined(separator: " + "))（\(verificationHint)）"
+        }
+        return methods.joined(separator: " + ")
     }
 }
 

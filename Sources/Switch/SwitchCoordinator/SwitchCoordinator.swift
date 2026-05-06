@@ -13,6 +13,7 @@ public enum SwitchPreflightWarning: String, Equatable, Sendable {
     case authorizationUnknown = "authorization_unknown"
     case snapshotMissing = "snapshot_missing"
     case snapshotStale = "snapshot_stale"
+    case additionalVerificationRequired = "additional_verification_required"
 }
 
 public struct SwitchPreflight: Equatable, Identifiable, Sendable {
@@ -359,6 +360,9 @@ public struct SwitchCoordinator: Sendable {
         var warnings: [SwitchPreflightWarning] = []
         if target.authStatus == .unknown {
             warnings.append(.authorizationUnknown)
+        }
+        if !target.verificationMethods.isEmpty {
+            warnings.append(.additionalVerificationRequired)
         }
         guard let targetSnapshot else {
             warnings.append(.snapshotMissing)
