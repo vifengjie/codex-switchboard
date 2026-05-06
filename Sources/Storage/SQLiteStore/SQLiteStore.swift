@@ -1,0 +1,750 @@
+import CodexQuotaCore
+import Foundation
+import SQLite3
+
+public enum SQLiteStoreError: Error, Equatable, Sendable {
+    case openFailed(String)
+    case prepareFailed(String)
+    case stepFailed(String)
+    case bindFailed(String)
+    case migrationFailed(String)
+    case encodingFailed(String)
+    case decodingFailed(String)
+}
+
+public struct SQLiteStore: Sendable {
+    public var databaseURL: URL
+
+    public init(databaseURL: URL) {
+        self.databaseURL = databaseURL
+    }
+
+    public func migrate() throws {
+        try FileManager.default.createDirectory(
+            at: databaseURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        try withDatabase { db in
+            try execute(
+                db,
+                """
+                PRAGMA journal_mode = WAL;
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS accounts (
+                    account_id TEXT PRIMARY KEY,
+                    alias TEXT NOT NULL,
+                    workspace_name TEXT,
+                    email_masked TEXT,
+                    plan_type TEXT NOT NULL,
+                    auth_status TEXT NOT NULL,
+                    enabled INTEGER NOT NULL,
+                    priority INTEGER NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_accounts_enabled_priority
+                    ON accounts(enabled, priority DESC, alias);
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    audit_id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    object_type TEXT,
+                    object_id TEXT,
+                    result TEXT NOT NULL,
+                    message TEXT,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_audit_events_created_at
+                    ON audit_events(created_at DESC);
+                CREATE TABLE IF NOT EXISTS usage_events (
+                    event_id TEXT PRIMARY KEY,
+                    account_alias TEXT,
+                    thread_id TEXT,
+                    task_title_masked TEXT,
+                    event_time REAL NOT NULL,
+                    model TEXT,
+                    input_tokens_delta INTEGER NOT NULL DEFAULT 0,
+                    cached_input_tokens_delta INTEGER NOT NULL DEFAULT 0,
+                    output_tokens_delta INTEGER NOT NULL DEFAULT 0,
+                    reasoning_output_tokens_delta INTEGER NOT NULL DEFAULT 0,
+                    estimated_credits_delta REAL,
+                    rate_card_version TEXT,
+                    source TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_usage_events_event_time
+                    ON usage_events(event_time DESC);
+                CREATE INDEX IF NOT EXISTS idx_usage_events_account_model
+                    ON usage_events(account_alias, model, event_time DESC);
+                CREATE TABLE IF NOT EXISTS quota_snapshots (
+                    snapshot_id TEXT PRIMARY KEY,
+                    account_alias TEXT NOT NULL,
+                    captured_at REAL NOT NULL,
+                    five_hour_remaining_percent REAL,
+                    weekly_remaining_percent REAL,
+                    five_hour_resets_at REAL,
+                    weekly_resets_at REAL,
+                    confidence TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+                    estimated_credits REAL,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_quota_snapshots_captured_at
+                    ON quota_snapshots(captured_at DESC);
+                CREATE TABLE IF NOT EXISTS collector_offsets (
+                    file_id TEXT PRIMARY KEY,
+                    path TEXT NOT NULL,
+                    last_offset INTEGER NOT NULL DEFAULT 0,
+                    last_inode INTEGER,
+                    last_seen_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_collector_offsets_last_seen
+                    ON collector_offsets(last_seen_at DESC);
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (1, strftime('%s', 'now'));
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (2, strftime('%s', 'now'));
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (3, strftime('%s', 'now'));
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (4, strftime('%s', 'now'));
+                """
+            )
+        }
+    }
+
+    public func withDatabase<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
+        var db: OpaquePointer?
+        let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+        guard sqlite3_open_v2(databaseURL.path, &db, flags, nil) == SQLITE_OK, let db else {
+            let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown sqlite open error"
+            if let db {
+                sqlite3_close(db)
+            }
+            throw SQLiteStoreError.openFailed(message)
+        }
+
+        defer {
+            sqlite3_close(db)
+        }
+
+        return try body(db)
+    }
+
+    public func execute(_ db: OpaquePointer, _ sql: String) throws {
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        guard sqlite3_exec(db, sql, nil, nil, &errorMessage) == SQLITE_OK else {
+            let message = errorMessage.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(db))
+            sqlite3_free(errorMessage)
+            throw SQLiteStoreError.migrationFailed(message)
+        }
+    }
+}
+
+public struct SQLiteUsageEventRepository: Sendable {
+    private let store: SQLiteStore
+
+    public init(store: SQLiteStore) {
+        self.store = store
+    }
+
+    public func save(_ event: UsageEvent) throws {
+        try store.withDatabase { db in
+            let sql = """
+                INSERT INTO usage_events(
+                    event_id,
+                    account_alias,
+                    thread_id,
+                    task_title_masked,
+                    event_time,
+                    model,
+                    input_tokens_delta,
+                    cached_input_tokens_delta,
+                    output_tokens_delta,
+                    reasoning_output_tokens_delta,
+                    estimated_credits_delta,
+                    rate_card_version,
+                    source,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(event_id) DO UPDATE SET
+                    account_alias = excluded.account_alias,
+                    thread_id = excluded.thread_id,
+                    task_title_masked = excluded.task_title_masked,
+                    event_time = excluded.event_time,
+                    model = excluded.model,
+                    input_tokens_delta = excluded.input_tokens_delta,
+                    cached_input_tokens_delta = excluded.cached_input_tokens_delta,
+                    output_tokens_delta = excluded.output_tokens_delta,
+                    reasoning_output_tokens_delta = excluded.reasoning_output_tokens_delta,
+                    estimated_credits_delta = excluded.estimated_credits_delta,
+                    rate_card_version = excluded.rate_card_version,
+                    source = excluded.source
+                """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer {
+                sqlite3_finalize(statement)
+            }
+
+            bindText(statement, index: 1, value: event.id.uuidString)
+            bindOptionalText(statement, index: 2, value: event.accountAlias)
+            bindOptionalText(statement, index: 3, value: event.threadID)
+            bindOptionalText(statement, index: 4, value: event.taskTitleMasked)
+            bindDouble(statement, index: 5, value: event.eventTime.timeIntervalSince1970)
+            bindOptionalText(statement, index: 6, value: event.model)
+            bindInt64(statement, index: 7, value: Int64(event.inputTokensDelta))
+            bindInt64(statement, index: 8, value: Int64(event.cachedInputTokensDelta))
+            bindInt64(statement, index: 9, value: Int64(event.outputTokensDelta))
+            bindInt64(statement, index: 10, value: Int64(event.reasoningOutputTokensDelta))
+            bindOptionalDouble(statement, index: 11, value: event.estimatedCreditsDelta)
+            bindOptionalText(statement, index: 12, value: event.rateCardVersion)
+            bindText(statement, index: 13, value: event.source.rawValue)
+            bindDouble(statement, index: 14, value: Date().timeIntervalSince1970)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw SQLiteStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    public func recent(limit: Int = 200) throws -> [UsageEvent] {
+        try store.withDatabase { db in
+            let sql = """
+                SELECT event_id, account_alias, thread_id, task_title_masked,
+                       event_time, model, input_tokens_delta, cached_input_tokens_delta,
+                       output_tokens_delta, reasoning_output_tokens_delta,
+                       estimated_credits_delta, rate_card_version, source
+                FROM usage_events
+                ORDER BY event_time DESC
+                LIMIT ?
+                """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer {
+                sqlite3_finalize(statement)
+            }
+
+            bindInt64(statement, index: 1, value: Int64(limit))
+
+            var events: [UsageEvent] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                events.append(readUsageEvent(from: statement))
+            }
+            return events
+        }
+    }
+
+    private func readUsageEvent(from statement: OpaquePointer?) -> UsageEvent {
+        let idRaw = columnText(statement, index: 0) ?? UUID().uuidString
+        let sourceRaw = columnText(statement, index: 12) ?? UsageEventSource.manual.rawValue
+
+        return UsageEvent(
+            id: UUID(uuidString: idRaw) ?? UUID(),
+            accountAlias: columnText(statement, index: 1),
+            threadID: columnText(statement, index: 2),
+            taskTitleMasked: columnText(statement, index: 3),
+            eventTime: Date(timeIntervalSince1970: sqlite3_column_double(statement, 4)),
+            model: columnText(statement, index: 5),
+            inputTokensDelta: Int(sqlite3_column_int64(statement, 6)),
+            cachedInputTokensDelta: Int(sqlite3_column_int64(statement, 7)),
+            outputTokensDelta: Int(sqlite3_column_int64(statement, 8)),
+            reasoningOutputTokensDelta: Int(sqlite3_column_int64(statement, 9)),
+            estimatedCreditsDelta: columnOptionalDouble(statement, index: 10),
+            rateCardVersion: columnText(statement, index: 11),
+            source: UsageEventSource(rawValue: sourceRaw) ?? .manual
+        )
+    }
+}
+
+public struct SQLiteAuditRepository: Sendable {
+    private let store: SQLiteStore
+
+    public init(store: SQLiteStore) {
+        self.store = store
+    }
+
+    public func record(_ event: AuditEvent) throws {
+        try store.withDatabase { db in
+            let sql = """
+                INSERT INTO audit_events(
+                    audit_id,
+                    event_type,
+                    actor,
+                    object_type,
+                    object_id,
+                    result,
+                    message,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer {
+                sqlite3_finalize(statement)
+            }
+
+            bindText(statement, index: 1, value: event.id.uuidString)
+            bindText(statement, index: 2, value: event.eventType.rawValue)
+            bindText(statement, index: 3, value: event.actorName)
+            bindOptionalText(statement, index: 4, value: event.objectType)
+            bindOptionalText(statement, index: 5, value: event.objectID)
+            bindText(statement, index: 6, value: event.result.rawValue)
+            bindOptionalText(statement, index: 7, value: event.message)
+            bindDouble(statement, index: 8, value: event.createdAt.timeIntervalSince1970)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw SQLiteStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    public func recent(limit: Int = 100) throws -> [AuditEvent] {
+        try store.withDatabase { db in
+            let sql = """
+                SELECT audit_id, event_type, actor, object_type, object_id,
+                       result, message, created_at
+                FROM audit_events
+                ORDER BY created_at DESC
+                LIMIT ?
+                """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer {
+                sqlite3_finalize(statement)
+            }
+
+            bindInt64(statement, index: 1, value: Int64(limit))
+
+            var events: [AuditEvent] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                events.append(readAuditEvent(from: statement))
+            }
+            return events
+        }
+    }
+
+    private func readAuditEvent(from statement: OpaquePointer?) -> AuditEvent {
+        let idRaw = columnText(statement, index: 0) ?? UUID().uuidString
+        let typeRaw = columnText(statement, index: 1) ?? AuditEventType.refresh.rawValue
+        let resultRaw = columnText(statement, index: 5) ?? AuditResult.success.rawValue
+
+        return AuditEvent(
+            id: UUID(uuidString: idRaw) ?? UUID(),
+            eventType: AuditEventType(rawValue: typeRaw) ?? .refresh,
+            actorName: columnText(statement, index: 2) ?? NSUserName(),
+            objectType: columnText(statement, index: 3),
+            objectID: columnText(statement, index: 4),
+            result: AuditResult(rawValue: resultRaw) ?? .success,
+            message: columnText(statement, index: 6),
+            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 7))
+        )
+    }
+}
+
+public struct SQLiteAccountRepository: Sendable {
+    private let store: SQLiteStore
+
+    public init(store: SQLiteStore) {
+        self.store = store
+    }
+
+    public func listAccounts() throws -> [Account] {
+        try store.withDatabase { db in
+            let sql = """
+                SELECT account_id, alias, workspace_name, email_masked,
+                       plan_type, auth_status, enabled, priority
+                FROM accounts
+                ORDER BY enabled DESC, priority DESC, alias ASC
+                """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer {
+                sqlite3_finalize(statement)
+            }
+
+            var accounts: [Account] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                accounts.append(readAccount(from: statement))
+            }
+            return accounts
+        }
+    }
+
+    public func account(id: UUID) throws -> Account? {
+        try store.withDatabase { db in
+            let sql = """
+                SELECT account_id, alias, workspace_name, email_masked,
+                       plan_type, auth_status, enabled, priority
+                FROM accounts
+                WHERE account_id = ?
+                LIMIT 1
+                """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer {
+                sqlite3_finalize(statement)
+            }
+
+            bindText(statement, index: 1, value: id.uuidString)
+
+            guard sqlite3_step(statement) == SQLITE_ROW else {
+                return nil
+            }
+            return readAccount(from: statement)
+        }
+    }
+
+    public func upsert(_ account: Account) throws {
+        try store.withDatabase { db in
+            let sql = """
+                INSERT INTO accounts(
+                    account_id, alias, workspace_name, email_masked,
+                    plan_type, auth_status, enabled, priority,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    alias = excluded.alias,
+                    workspace_name = excluded.workspace_name,
+                    email_masked = excluded.email_masked,
+                    plan_type = excluded.plan_type,
+                    auth_status = excluded.auth_status,
+                    enabled = excluded.enabled,
+                    priority = excluded.priority,
+                    updated_at = excluded.updated_at
+                """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer {
+                sqlite3_finalize(statement)
+            }
+
+            let now = Date().timeIntervalSince1970
+            bindText(statement, index: 1, value: account.id.uuidString)
+            bindText(statement, index: 2, value: account.alias)
+            bindOptionalText(statement, index: 3, value: account.workspaceName)
+            bindOptionalText(statement, index: 4, value: account.emailMasked)
+            bindText(statement, index: 5, value: account.planType.rawValue)
+            bindText(statement, index: 6, value: account.authStatus.rawValue)
+            bindBool(statement, index: 7, value: account.enabled)
+            bindInt64(statement, index: 8, value: Int64(account.priority))
+            bindDouble(statement, index: 9, value: now)
+            bindDouble(statement, index: 10, value: now)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw SQLiteStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    public func delete(id: UUID) throws {
+        try store.withDatabase { db in
+            let sql = "DELETE FROM accounts WHERE account_id = ?"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer {
+                sqlite3_finalize(statement)
+            }
+
+            bindText(statement, index: 1, value: id.uuidString)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw SQLiteStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    private func readAccount(from statement: OpaquePointer?) -> Account {
+        let idRaw = columnText(statement, index: 0) ?? UUID().uuidString
+        let id = UUID(uuidString: idRaw) ?? UUID()
+        let planTypeRaw = columnText(statement, index: 4) ?? PlanType.unknown.rawValue
+        let authStatusRaw = columnText(statement, index: 5) ?? AuthStatus.unknown.rawValue
+
+        return Account(
+            id: id,
+            alias: columnText(statement, index: 1) ?? "未命名账号",
+            workspaceName: columnText(statement, index: 2),
+            emailMasked: columnText(statement, index: 3),
+            planType: PlanType(rawValue: planTypeRaw) ?? .unknown,
+            authStatus: AuthStatus(rawValue: authStatusRaw) ?? .unknown,
+            enabled: sqlite3_column_int(statement, 6) == 1,
+            priority: Int(sqlite3_column_int64(statement, 7))
+        )
+    }
+}
+
+public struct SQLiteSettingsRepository: Sendable {
+    private let store: SQLiteStore
+    private let key = "default"
+
+    public init(store: SQLiteStore) {
+        self.store = store
+    }
+
+    public func load() throws -> AppSettings? {
+        try store.withDatabase { db in
+            let sql = "SELECT value FROM app_settings WHERE key = ? LIMIT 1"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer {
+                sqlite3_finalize(statement)
+            }
+
+            bindText(statement, index: 1, value: key)
+
+            let result = sqlite3_step(statement)
+            guard result == SQLITE_ROW else {
+                return nil
+            }
+
+            guard let text = sqlite3_column_text(statement, 0) else {
+                return nil
+            }
+
+            let data = Data(String(cString: text).utf8)
+            do {
+                return try JSONDecoder().decode(AppSettings.self, from: data)
+            } catch {
+                throw SQLiteStoreError.decodingFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    public func save(_ settings: AppSettings) throws {
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(settings)
+        } catch {
+            throw SQLiteStoreError.encodingFailed(error.localizedDescription)
+        }
+
+        guard let value = String(data: data, encoding: .utf8) else {
+            throw SQLiteStoreError.encodingFailed("settings JSON is not valid UTF-8")
+        }
+
+        try store.withDatabase { db in
+            let sql = """
+                INSERT INTO app_settings(key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer {
+                sqlite3_finalize(statement)
+            }
+
+            bindText(statement, index: 1, value: key)
+            bindText(statement, index: 2, value: value)
+            bindDouble(statement, index: 3, value: Date().timeIntervalSince1970)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw SQLiteStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    public func ensureDefaultSettings() throws -> AppSettings {
+        if let existing = try load() {
+            return existing
+        }
+        let settings = AppSettings.default
+        try save(settings)
+        return settings
+    }
+}
+
+public struct SQLiteSnapshotRepository: Sendable {
+    private let store: SQLiteStore
+
+    public init(store: SQLiteStore) {
+        self.store = store
+    }
+
+    public func latestSnapshot() throws -> QuotaSnapshot? {
+        try store.withDatabase { db in
+            let sql = """
+                SELECT account_alias, captured_at, five_hour_remaining_percent,
+                       weekly_remaining_percent, five_hour_resets_at, weekly_resets_at,
+                       confidence, input_tokens, cached_input_tokens, output_tokens,
+                       reasoning_output_tokens, estimated_credits
+                FROM quota_snapshots
+                ORDER BY captured_at DESC
+                LIMIT 1
+                """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer {
+                sqlite3_finalize(statement)
+            }
+
+            let result = sqlite3_step(statement)
+            guard result == SQLITE_ROW else {
+                return nil
+            }
+
+            let confidenceRaw = columnText(statement, index: 6) ?? SnapshotConfidence.partial.rawValue
+            let confidence = SnapshotConfidence(rawValue: confidenceRaw) ?? .partial
+
+            return QuotaSnapshot(
+                accountAlias: columnText(statement, index: 0) ?? "未设置",
+                capturedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 1)),
+                fiveHourRemainingPercent: columnOptionalDouble(statement, index: 2),
+                weeklyRemainingPercent: columnOptionalDouble(statement, index: 3),
+                fiveHourResetsAt: columnOptionalDate(statement, index: 4),
+                weeklyResetsAt: columnOptionalDate(statement, index: 5),
+                confidence: confidence,
+                tokenUsage: TokenUsage(
+                    inputTokens: Int(sqlite3_column_int64(statement, 7)),
+                    cachedInputTokens: Int(sqlite3_column_int64(statement, 8)),
+                    outputTokens: Int(sqlite3_column_int64(statement, 9)),
+                    reasoningOutputTokens: Int(sqlite3_column_int64(statement, 10))
+                ),
+                estimatedCredits: columnOptionalDouble(statement, index: 11)
+            )
+        }
+    }
+
+    public func save(_ snapshot: QuotaSnapshot) throws {
+        try store.withDatabase { db in
+            let sql = """
+                INSERT INTO quota_snapshots(
+                    snapshot_id,
+                    account_alias,
+                    captured_at,
+                    five_hour_remaining_percent,
+                    weekly_remaining_percent,
+                    five_hour_resets_at,
+                    weekly_resets_at,
+                    confidence,
+                    input_tokens,
+                    cached_input_tokens,
+                    output_tokens,
+                    reasoning_output_tokens,
+                    estimated_credits,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer {
+                sqlite3_finalize(statement)
+            }
+
+            bindText(statement, index: 1, value: UUID().uuidString)
+            bindText(statement, index: 2, value: snapshot.accountAlias)
+            bindDouble(statement, index: 3, value: snapshot.capturedAt.timeIntervalSince1970)
+            bindOptionalDouble(statement, index: 4, value: snapshot.fiveHourRemainingPercent)
+            bindOptionalDouble(statement, index: 5, value: snapshot.weeklyRemainingPercent)
+            bindOptionalDouble(statement, index: 6, value: snapshot.fiveHourResetsAt?.timeIntervalSince1970)
+            bindOptionalDouble(statement, index: 7, value: snapshot.weeklyResetsAt?.timeIntervalSince1970)
+            bindText(statement, index: 8, value: snapshot.confidence.rawValue)
+            bindInt64(statement, index: 9, value: Int64(snapshot.tokenUsage.inputTokens))
+            bindInt64(statement, index: 10, value: Int64(snapshot.tokenUsage.cachedInputTokens))
+            bindInt64(statement, index: 11, value: Int64(snapshot.tokenUsage.outputTokens))
+            bindInt64(statement, index: 12, value: Int64(snapshot.tokenUsage.reasoningOutputTokens))
+            bindOptionalDouble(statement, index: 13, value: snapshot.estimatedCredits)
+            bindDouble(statement, index: 14, value: Date().timeIntervalSince1970)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw SQLiteStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+}
+
+private func bindText(_ statement: OpaquePointer?, index: Int32, value: String) {
+    sqlite3_bind_text(statement, index, value, -1, SQLITE_TRANSIENT)
+}
+
+private func bindOptionalText(_ statement: OpaquePointer?, index: Int32, value: String?) {
+    if let value {
+        sqlite3_bind_text(statement, index, value, -1, SQLITE_TRANSIENT)
+    } else {
+        sqlite3_bind_null(statement, index)
+    }
+}
+
+private func bindDouble(_ statement: OpaquePointer?, index: Int32, value: Double) {
+    sqlite3_bind_double(statement, index, value)
+}
+
+private func bindOptionalDouble(_ statement: OpaquePointer?, index: Int32, value: Double?) {
+    if let value {
+        sqlite3_bind_double(statement, index, value)
+    } else {
+        sqlite3_bind_null(statement, index)
+    }
+}
+
+private func bindInt64(_ statement: OpaquePointer?, index: Int32, value: Int64) {
+    sqlite3_bind_int64(statement, index, value)
+}
+
+private func bindBool(_ statement: OpaquePointer?, index: Int32, value: Bool) {
+    sqlite3_bind_int(statement, index, value ? 1 : 0)
+}
+
+private func columnText(_ statement: OpaquePointer?, index: Int32) -> String? {
+    guard let text = sqlite3_column_text(statement, index) else {
+        return nil
+    }
+    return String(cString: text)
+}
+
+private func columnOptionalDouble(_ statement: OpaquePointer?, index: Int32) -> Double? {
+    if sqlite3_column_type(statement, index) == SQLITE_NULL {
+        return nil
+    }
+    return sqlite3_column_double(statement, index)
+}
+
+private func columnOptionalDate(_ statement: OpaquePointer?, index: Int32) -> Date? {
+    columnOptionalDouble(statement, index: index).map { Date(timeIntervalSince1970: $0) }
+}
+
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)

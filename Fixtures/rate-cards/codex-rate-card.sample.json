@@ -1,0 +1,12 @@
+{
+  "version": "fixture-2026-05-03",
+  "source_url": "https://help.openai.com/en/articles/20001106-codex-rate-card",
+  "models": [
+    {
+      "model": "mock-codex",
+      "input_credits_per_m": 10,
+      "cached_input_credits_per_m": 2,
+      "output_credits_per_m": 40
+    }
+  ]
+}

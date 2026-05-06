@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "project_cwd": "/Users/fengjie/Documents/CodeX/codex-switchboard",
+  "baseline_captured_at_utc": "2026-05-03T03:30:07.200Z",
+  "baseline_captured_at_local": "2026-05-03 11:30:07 CST",
+  "baseline_source": "First token_count checkpoint after the user confirmed long-term tracking should start now.",
+  "project_total_tokens_at_baseline": 4037048,
+  "rate_limits_at_baseline": {
+    "plan_type": "team",
+    "primary_used_percent": 34.0,
+    "primary_window_minutes": 300,
+    "primary_resets_at": 1777793326,
+    "secondary_used_percent": 30.0,
+    "secondary_window_minutes": 10080,
+    "secondary_resets_at": 1777961735
+  },
+  "thread_token_offsets": [
+    {
+      "thread_id": "019debd1-d288-7b63-abe6-8f6696193a8b",
+      "title": "分析 tokens 额度消耗",
+      "tokens_used_at_baseline": 971412
+    },
+    {
+      "thread_id": "019debc4-e69e-76e2-bc0b-2afccebc9536",
+      "title": "完善多账号配额需求分析",
+      "tokens_used_at_baseline": 3046129
+    },
+    {
+      "thread_id": "019debc5-6b33-74a1-9c04-81f428a10879",
+      "title": "决定对话拆分方式",
+      "tokens_used_at_baseline": 19507
+    }
+  ],
+  "notes": [
+    "Project token deltas are computed as current per-thread tokens minus these offsets.",
+    "The quota forecast must use observed rate_limits.primary and rate_limits.secondary movement; it must not be treated as a pure token bucket."
+  ]
+}
