@@ -6,6 +6,7 @@ import SwiftUI
 struct ManagementRootView: View {
     @StateObject private var viewModel = ManagementViewModel()
     @State private var accountEditorDraft: AccountEditorDraft?
+    @State private var selectedAccountID: Account.ID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,6 +20,7 @@ struct ManagementRootView: View {
 
                 AccountsTab(
                     accounts: viewModel.accounts,
+                    selectedAccountID: $selectedAccountID,
                     addAction: {
                         accountEditorDraft = .new(nextIndex: viewModel.accounts.count + 1)
                     },
@@ -142,6 +144,7 @@ private struct OverviewTab: View {
 
 private struct AccountsTab: View {
     let accounts: [Account]
+    @Binding var selectedAccountID: Account.ID?
     let addAction: () -> Void
     let editAction: (Account) -> Void
     let toggleAction: (Account) -> Void
@@ -157,7 +160,7 @@ private struct AccountsTab: View {
                 Button("添加账号", action: addAction)
             }
 
-            Table(accounts) {
+            Table(accounts, selection: $selectedAccountID) {
                 TableColumn("别名") { account in
                     Text(account.alias)
                 }
@@ -187,22 +190,50 @@ private struct AccountsTab: View {
                         toggleAction(account)
                     }
                 }
-                TableColumn("操作") { account in
-                    HStack(spacing: 8) {
-                        Button("编辑") {
-                            editAction(account)
-                        }
-                        Button("切换") {
-                            switchAction(account)
-                        }
-                        Button("删除") {
-                            deleteAction(account)
-                        }
+            }
+
+            HStack {
+                if let selectedAccount {
+                    Text("已选中：\(selectedAccount.alias)")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("先选中一个账号，再执行编辑、切换或删除")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("编辑") {
+                    if let selectedAccount {
+                        editAction(selectedAccount)
                     }
                 }
+                .disabled(selectedAccount == nil)
+                Button("切换") {
+                    if let selectedAccount {
+                        switchAction(selectedAccount)
+                    }
+                }
+                .disabled(selectedAccount == nil)
+                Button("删除") {
+                    if let selectedAccount {
+                        deleteAction(selectedAccount)
+                    }
+                }
+                .disabled(selectedAccount == nil)
             }
         }
         .padding(20)
+        .onChange(of: accounts) { _, updatedAccounts in
+            if let selectedAccountID, updatedAccounts.contains(where: { $0.id == selectedAccountID }) == false {
+                self.selectedAccountID = nil
+            }
+        }
+    }
+
+    private var selectedAccount: Account? {
+        guard let selectedAccountID else {
+            return nil
+        }
+        return accounts.first { $0.id == selectedAccountID }
     }
 
     private func verificationSummary(for account: Account) -> String {
