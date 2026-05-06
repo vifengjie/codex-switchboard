@@ -60,3 +60,16 @@ Before opening a PR:
 2. Confirm exports and diagnostics remain sanitized
 3. Confirm any new account or switching behavior is audited
 4. Update `README.md` or docs when the user-facing scope changes
+
+## Issue Reports
+
+For user-visible bugs, prefer the GitHub bug template under:
+
+- `.github/ISSUE_TEMPLATE/bug_report.md`
+
+Bug reports should include:
+
+- commit SHA
+- macOS version
+- reproduction steps
+- whether sanitized diagnostics export is attached

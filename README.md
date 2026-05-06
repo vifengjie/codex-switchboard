@@ -2,7 +2,7 @@
 
 Codex Quota Manager is a macOS menu bar app for local Codex quota visibility, token usage review, low-quota alerts, and user-confirmed account switching.
 
-The repository is currently in the `M5` management, export, cleanup, and diagnostics slice. `M1` to `M5` are implemented on `main`; `M6` will focus on packaging, release documents, and beta acceptance hardening.
+The repository is currently in the `M6` beta hardening slice. `M1` to `M5` are implemented on `main`; `M6` is focused on packaging notes, release documents, feedback intake, and beta acceptance hardening.
 
 ## What It Does
 
@@ -29,7 +29,7 @@ Not implemented yet:
 - Reading, copying, replacing, exporting, or syncing `~/.codex/auth.json`.
 - Centralized dashboard, enterprise control plane, or multi-device aggregation.
 - Release packaging, notarization, and `.dmg` distribution.
-- Full `PRIVACY`, `SECURITY`, `CONTRIBUTING`, and release-note hardening.
+- Public beta packaging, installer polish, and notarization.
 
 ## Run Locally
 
@@ -61,6 +61,12 @@ If you are not already in the repo directory:
 
 ```bash
 swift run --package-path /Users/fengjie/Documents/CodeX/codex-switchboard CodexQuotaManager
+```
+
+Build a local beta `.app` bundle:
+
+```bash
+./tools/build_beta_app.sh
 ```
 
 In restricted local environments, SwiftPM may need writable cache paths:
@@ -114,9 +120,13 @@ Current local verification baseline:
 - [DEV-001](/Users/fengjie/Documents/CodeX/codex-switchboard/docs/05-development-plan/DEV-001-mvp-task-breakdown.md)
 - [REQ-001](/Users/fengjie/Documents/CodeX/codex-switchboard/docs/02-requirements/REQ-001-codex-multi-account-quota-management.md)
 - [PRD-001](/Users/fengjie/Documents/CodeX/codex-switchboard/docs/03-product-design/PRD-001-product-design-overview.md)
+- [DEV-002](/Users/fengjie/Documents/CodeX/codex-switchboard/docs/05-development-plan/DEV-002-public-beta-hardening.md)
+- [REL-001](/Users/fengjie/Documents/CodeX/codex-switchboard/docs/07-release/REL-001-local-build-and-beta-packaging.md)
+- [BETA-RELEASE-NOTES.md](/Users/fengjie/Documents/CodeX/codex-switchboard/docs/BETA-RELEASE-NOTES.md)
 - [PRIVACY.md](/Users/fengjie/Documents/CodeX/codex-switchboard/PRIVACY.md)
 - [SECURITY.md](/Users/fengjie/Documents/CodeX/codex-switchboard/SECURITY.md)
 - [CONTRIBUTING.md](/Users/fengjie/Documents/CodeX/codex-switchboard/CONTRIBUTING.md)
+- [LICENSE](/Users/fengjie/Documents/CodeX/codex-switchboard/LICENSE)
 
 ## Known Limits
 

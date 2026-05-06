@@ -13,6 +13,7 @@
 | 技术方案 | `04-technical-solution/` | [TECH-001-architecture-and-implementation-options.md](04-technical-solution/TECH-001-architecture-and-implementation-options.md) | 架构、数据、采集、切换、安全方案 |
 | 开发计划 | `05-development-plan/` | [DEV-001-mvp-task-breakdown.md](05-development-plan/DEV-001-mvp-task-breakdown.md) | MVP 任务拆解、里程碑、验收闭环 |
 | 验证研究 | `06-validation/` | [VAL-001-poc-validation-plan.md](06-validation/VAL-001-poc-validation-plan.md), [VAL-002-usage-tracking-baseline.md](06-validation/VAL-002-usage-tracking-baseline.md) | PoC、待验证问题、实测记录、用量基线 |
+| 发布交付 | `07-release/` | [REL-001-local-build-and-beta-packaging.md](07-release/REL-001-local-build-and-beta-packaging.md) | 本地构建、Beta 打包、反馈入口 |
 | 资料资产 | `90-assets/` | [README.md](90-assets/README.md) | Mermaid、图片、截图、原型素材 |
 
 ## 引用规则
@@ -22,6 +23,7 @@
 - 引用技术方案时使用 `TECH-001`。
 - 引用开发拆解时使用 `DEV-001`。
 - 引用验证计划时使用 `VAL-001`。
+- 引用发布说明时使用 `REL-001`。
 
 示例：
 
