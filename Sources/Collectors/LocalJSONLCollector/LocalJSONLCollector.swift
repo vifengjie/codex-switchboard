@@ -7,7 +7,9 @@ public struct LocalJSONLCollector: CollectorAdapter {
     public let sourceName = "local_jsonl"
     public var rootDirectory: URL
     public var rolloutPaths: [URL]
+    public var threadMetadataByRolloutPath: [String: CodexThreadMetadata]
     public var accountAlias: String
+    public var rateCardManager: RateCardManager?
     public var usageEventRepository: SQLiteUsageEventRepository?
     public var snapshotRepository: SQLiteSnapshotRepository?
     public var offsetRepository: SQLiteCollectorOffsetRepository?
@@ -15,14 +17,18 @@ public struct LocalJSONLCollector: CollectorAdapter {
     public init(
         rootDirectory: URL = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".codex"),
         rolloutPaths: [URL] = [],
+        threadMetadataByRolloutPath: [String: CodexThreadMetadata] = [:],
         accountAlias: String = "本机 Codex",
+        rateCardManager: RateCardManager? = nil,
         usageEventRepository: SQLiteUsageEventRepository? = nil,
         snapshotRepository: SQLiteSnapshotRepository? = nil,
         offsetRepository: SQLiteCollectorOffsetRepository? = nil
     ) {
         self.rootDirectory = rootDirectory
         self.rolloutPaths = rolloutPaths
+        self.threadMetadataByRolloutPath = threadMetadataByRolloutPath
         self.accountAlias = accountAlias
+        self.rateCardManager = rateCardManager
         self.usageEventRepository = usageEventRepository
         self.snapshotRepository = snapshotRepository
         self.offsetRepository = offsetRepository
@@ -46,7 +52,8 @@ public struct LocalJSONLCollector: CollectorAdapter {
             let parsed = try parseFile(
                 fileURL,
                 startOffset: startOffset,
-                normalizer: normalizer
+                normalizer: normalizer,
+                context: context(for: fileURL)
             )
 
             for event in parsed.usageEvents {
@@ -149,7 +156,8 @@ public struct LocalJSONLCollector: CollectorAdapter {
     private func parseFile(
         _ fileURL: URL,
         startOffset: UInt64,
-        normalizer: CodexEventNormalizer
+        normalizer: CodexEventNormalizer,
+        context: CodexJSONLContext?
     ) throws -> ParsedFileResult {
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer {
@@ -179,6 +187,7 @@ public struct LocalJSONLCollector: CollectorAdapter {
                     lineOffset: lineOffset,
                     fileURL: fileURL,
                     normalizer: normalizer,
+                    context: context,
                     usageEvents: &usageEvents,
                     snapshots: &snapshots,
                     parseFailures: &parseFailures
@@ -200,6 +209,7 @@ public struct LocalJSONLCollector: CollectorAdapter {
                 lineOffset: lineOffset,
                 fileURL: fileURL,
                 normalizer: normalizer,
+                context: context,
                 usageEvents: &usageEvents,
                 snapshots: &snapshots,
                 parseFailures: &parseFailures
@@ -222,6 +232,7 @@ public struct LocalJSONLCollector: CollectorAdapter {
         lineOffset: UInt64,
         fileURL: URL,
         normalizer: CodexEventNormalizer,
+        context: CodexJSONLContext?,
         usageEvents: inout [UsageEvent],
         snapshots: inout [QuotaSnapshot],
         parseFailures: inout Int
@@ -234,19 +245,61 @@ public struct LocalJSONLCollector: CollectorAdapter {
             guard let normalized = try normalizer.normalizeJSONLine(
                 lineData,
                 sourceURL: fileURL,
-                lineOffset: lineOffset
+                lineOffset: lineOffset,
+                context: context
             ) else {
                 return
             }
             if let usageEvent = normalized.usageEvent {
-                usageEvents.append(usageEvent)
+                usageEvents.append(enrichCredits(for: usageEvent))
             }
             if let snapshot = normalized.snapshot {
-                snapshots.append(snapshot)
+                snapshots.append(enrichCredits(for: snapshot, model: context?.model))
             }
         } catch {
             parseFailures += 1
         }
+    }
+
+    private func context(for fileURL: URL) -> CodexJSONLContext? {
+        let metadata = threadMetadataByRolloutPath[fileURL.standardizedFileURL.path]
+        guard let metadata else {
+            return nil
+        }
+        return CodexJSONLContext(
+            threadID: metadata.id,
+            model: metadata.model,
+            taskTitleMasked: metadata.titleMasked
+        )
+    }
+
+    private func enrichCredits(for event: UsageEvent) -> UsageEvent {
+        guard let estimated = rateCardManager?.estimatedCredits(
+            for: TokenUsage(
+                inputTokens: event.inputTokensDelta,
+                cachedInputTokens: event.cachedInputTokensDelta,
+                outputTokens: event.outputTokensDelta,
+                reasoningOutputTokens: event.reasoningOutputTokensDelta
+            ),
+            model: event.model
+        ) else {
+            return event
+        }
+
+        var updated = event
+        updated.estimatedCreditsDelta = estimated.credits
+        updated.rateCardVersion = estimated.rateCardVersion
+        return updated
+    }
+
+    private func enrichCredits(for snapshot: QuotaSnapshot, model: String?) -> QuotaSnapshot {
+        guard let estimated = rateCardManager?.estimatedCredits(for: snapshot.tokenUsage, model: model) else {
+            return snapshot
+        }
+
+        var updated = snapshot
+        updated.estimatedCredits = estimated.credits
+        return updated
     }
 }
 

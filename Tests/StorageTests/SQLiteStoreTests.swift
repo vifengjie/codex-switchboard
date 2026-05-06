@@ -302,6 +302,58 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(try repository.recent(limit: 10).map(\.fileID), ["/tmp/rollout.jsonl"])
     }
 
+    func testRateCardRepositoryPersistsCards() throws {
+        let store = SQLiteStore(databaseURL: makeTemporaryDatabaseURL())
+        try store.migrate()
+        let repository = SQLiteRateCardRepository(store: store)
+        let card = RateCard(
+            model: "mock-codex",
+            version: "fixture",
+            sourceURL: URL(string: "https://example.com/rate-card"),
+            inputCreditsPerM: 10,
+            cachedInputCreditsPerM: 2,
+            outputCreditsPerM: 40
+        )
+
+        try repository.upsert(card)
+
+        let loaded = try XCTUnwrap(repository.list().first)
+        XCTAssertEqual(loaded, card)
+        XCTAssertEqual(try repository.manager().estimatedCredits(for: TokenUsage(inputTokens: 1_000_000), model: "mock-codex")?.credits, 10)
+    }
+
+    func testAlertEventRepositoryPersistsRecentEventsAndDedupeLookup() throws {
+        let store = SQLiteStore(databaseURL: makeTemporaryDatabaseURL())
+        try store.migrate()
+        let repository = SQLiteAlertEventRepository(store: store)
+        let suppressed = AlertEvent(
+            alertType: .fiveHourRisk,
+            accountAlias: "主账号",
+            dedupeKey: "主账号|five_hour_risk",
+            snapshotCapturedAt: Date(timeIntervalSince1970: 100),
+            result: .suppressed,
+            createdAt: Date(timeIntervalSince1970: 100)
+        )
+        let delivered = AlertEvent(
+            alertType: .fiveHourRisk,
+            accountAlias: "主账号",
+            dedupeKey: "主账号|five_hour_risk",
+            snapshotCapturedAt: Date(timeIntervalSince1970: 200),
+            deliveredAt: Date(timeIntervalSince1970: 220),
+            result: .delivered,
+            message: "sent",
+            createdAt: Date(timeIntervalSince1970: 200)
+        )
+
+        try repository.record(suppressed)
+        try repository.record(delivered)
+
+        XCTAssertEqual(try repository.recent(limit: 10).map(\.result), [.delivered, .suppressed])
+        XCTAssertEqual(try repository.lastDelivered(dedupeKey: "主账号|five_hour_risk")?.deliveredAt?.timeIntervalSince1970, 220)
+        XCTAssertEqual(try repository.lastEvent(dedupeKey: "主账号|five_hour_risk")?.result, .delivered)
+        XCTAssertNil(try repository.lastDelivered(dedupeKey: "missing"))
+    }
+
     private func makeTemporaryDatabaseURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-quota-manager-\(UUID().uuidString)")

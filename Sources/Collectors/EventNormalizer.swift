@@ -15,6 +15,18 @@ public struct NormalizedCollectorEvent: Equatable, Sendable {
     }
 }
 
+public struct CodexJSONLContext: Equatable, Sendable {
+    public var threadID: String?
+    public var model: String?
+    public var taskTitleMasked: String?
+
+    public init(threadID: String? = nil, model: String? = nil, taskTitleMasked: String? = nil) {
+        self.threadID = threadID
+        self.model = model
+        self.taskTitleMasked = taskTitleMasked
+    }
+}
+
 public struct CodexEventNormalizer: Sendable {
     public var accountAlias: String
     private let quotaEngine: QuotaEngine
@@ -27,7 +39,8 @@ public struct CodexEventNormalizer: Sendable {
     public func normalizeJSONLine(
         _ data: Data,
         sourceURL: URL,
-        lineOffset: UInt64
+        lineOffset: UInt64,
+        context: CodexJSONLContext? = nil
     ) throws -> NormalizedCollectorEvent? {
         let object = try JSONSerialization.jsonObject(with: data)
         guard let root = object as? [String: Any] else {
@@ -62,13 +75,15 @@ public struct CodexEventNormalizer: Sendable {
         let model = firstString(
             root["model"],
             payload?["model"],
-            info?["model"]
+            info?["model"],
+            context?.model
         )
         let threadID = firstString(
             root["thread_id"],
             root["conversation_id"],
             payload?["thread_id"],
-            payload?["conversation_id"]
+            payload?["conversation_id"],
+            context?.threadID
         ) ?? sourceURL.deletingPathExtension().lastPathComponent
 
         var usageEvent: UsageEvent?
@@ -77,7 +92,7 @@ public struct CodexEventNormalizer: Sendable {
                 id: stableEventID(sourceURL: sourceURL, lineOffset: lineOffset, lineData: data),
                 accountAlias: accountAlias,
                 threadID: threadID,
-                taskTitleMasked: nil,
+                taskTitleMasked: context?.taskTitleMasked,
                 eventTime: eventTime,
                 model: model,
                 inputTokensDelta: lastUsage.usage.inputTokens,

@@ -102,6 +102,35 @@ final class LocalJSONLCollectorTests: XCTestCase {
         XCTAssertTrue(result.snapshots.isEmpty)
     }
 
+    func testLocalJSONLCollectorAddsCreditsWhenModelHasRateCard() async throws {
+        let root = try makeTemporaryDirectory()
+        let logURL = root.appendingPathComponent("rollout.jsonl")
+        try FileManager.default.copyItem(at: try fixtureURL(), to: logURL)
+        let metadata = CodexThreadMetadata(
+            id: "thread-1",
+            rolloutPath: logURL.standardizedFileURL.path,
+            cwd: root.path,
+            titleMasked: "Codex thread thread-1",
+            tokensUsed: 1,
+            createdAt: Date(timeIntervalSince1970: 100),
+            updatedAt: Date(timeIntervalSince1970: 200),
+            model: "mock-codex"
+        )
+
+        let result = try await LocalJSONLCollector(
+            rootDirectory: root,
+            threadMetadataByRolloutPath: [logURL.standardizedFileURL.path: metadata],
+            rateCardManager: .builtIn
+        ).collect()
+
+        XCTAssertEqual(result.usageEvents.first?.threadID, "thread-1")
+        XCTAssertEqual(result.usageEvents.first?.taskTitleMasked, "Codex thread thread-1")
+        XCTAssertEqual(result.usageEvents.first?.model, "mock-codex")
+        XCTAssertEqual(result.usageEvents.first?.estimatedCreditsDelta, 1.74)
+        XCTAssertEqual(result.usageEvents.first?.rateCardVersion, "fixture-2026-05-03")
+        XCTAssertEqual(result.snapshots.first?.estimatedCredits, 185.3)
+    }
+
     private func fixtureURL() throws -> URL {
         if let url = Bundle.module.url(
             forResource: "token-count-sample",

@@ -114,6 +114,28 @@ public struct SQLiteStore: Sendable {
                 );
                 CREATE INDEX IF NOT EXISTS idx_collector_offsets_last_seen
                     ON collector_offsets(last_seen_at DESC);
+                CREATE TABLE IF NOT EXISTS rate_cards (
+                    model TEXT PRIMARY KEY,
+                    version TEXT NOT NULL,
+                    source_url TEXT,
+                    input_credits_per_m REAL NOT NULL,
+                    cached_input_credits_per_m REAL NOT NULL,
+                    output_credits_per_m REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS alert_events (
+                    alert_id TEXT PRIMARY KEY,
+                    alert_type TEXT NOT NULL,
+                    account_alias TEXT NOT NULL,
+                    dedupe_key TEXT NOT NULL,
+                    snapshot_captured_at REAL NOT NULL,
+                    delivered_at REAL,
+                    result TEXT NOT NULL,
+                    message TEXT,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_alert_events_dedupe
+                    ON alert_events(dedupe_key, delivered_at DESC, created_at DESC);
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
                     VALUES (1, strftime('%s', 'now'));
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
@@ -122,6 +144,8 @@ public struct SQLiteStore: Sendable {
                     VALUES (3, strftime('%s', 'now'));
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
                     VALUES (4, strftime('%s', 'now'));
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (5, strftime('%s', 'now'));
                 """
             )
         }

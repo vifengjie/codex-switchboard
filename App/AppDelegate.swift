@@ -7,6 +7,7 @@ import CodexQuotaStorage
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusController: StatusItemController?
     private var refreshTask: Task<Void, Never>?
+    private let notificationCoordinator = QuotaNotificationCoordinator()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -64,6 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshStatusFromCollectors() async {
         let snapshot = await collectLatestSnapshot()
         statusController?.update(snapshot: snapshot)
+        await deliverNotificationIfNeeded(snapshot: snapshot)
     }
 
     private func collectLatestSnapshot() async -> QuotaSnapshot {
@@ -92,10 +94,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let stateCollector = CodexStateSQLiteCollector(
             databaseURL: codexRoot.appending(path: "state_5.sqlite")
         )
-        let rolloutURLs = (try? stateCollector.rolloutURLs()) ?? []
+        let threads = (try? stateCollector.listThreads()) ?? []
+        let rolloutURLs = threads
+            .map(\.rolloutPath)
+            .filter { !$0.isEmpty }
+            .map { URL(fileURLWithPath: $0) }
+        let metadataByRolloutPath = Dictionary(
+            threads.map { (URL(fileURLWithPath: $0.rolloutPath).standardizedFileURL.path, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         let jsonlCollector = LocalJSONLCollector(
             rootDirectory: codexRoot,
             rolloutPaths: rolloutURLs,
+            threadMetadataByRolloutPath: metadataByRolloutPath,
+            rateCardManager: .builtIn,
             usageEventRepository: usageRepository,
             snapshotRepository: snapshotRepository,
             offsetRepository: offsetRepository
@@ -112,5 +124,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private nonisolated static func defaultDatabaseURL() throws -> URL {
         try CodexQuotaStoragePaths.defaultDatabaseURL()
+    }
+
+    private func deliverNotificationIfNeeded(snapshot: QuotaSnapshot) async {
+        do {
+            let store = SQLiteStore(databaseURL: try Self.defaultDatabaseURL())
+            try store.migrate()
+            await notificationCoordinator.deliverIfNeeded(snapshot: snapshot, store: store)
+        } catch {
+            NSLog("Codex Quota Manager notification storage failed: \(error)")
+        }
     }
 }
