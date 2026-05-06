@@ -31,7 +31,7 @@ public struct AuditEvent: Equatable, Identifiable, Sendable {
     }
 }
 
-public enum AuditEventType: String, Sendable {
+public enum AuditEventType: String, CaseIterable, Sendable {
     case accountCreate = "account_create"
     case accountUpdate = "account_update"
     case accountDelete = "account_delete"
@@ -42,7 +42,7 @@ public enum AuditEventType: String, Sendable {
     case cleanup
 }
 
-public enum AuditResult: String, Sendable {
+public enum AuditResult: String, CaseIterable, Sendable {
     case success
     case failed
     case cancelled

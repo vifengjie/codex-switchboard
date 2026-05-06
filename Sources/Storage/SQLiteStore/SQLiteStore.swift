@@ -307,13 +307,41 @@ public struct SQLiteUsageEventRepository: Sendable {
     }
 
     public func recent(limit: Int = 200) throws -> [UsageEvent] {
+        try query(.init(limit: limit))
+    }
+
+    public func query(_ filter: UsageEventFilter) throws -> [UsageEvent] {
         try store.withDatabase { db in
+            var conditions: [String] = []
+            if filter.accountAlias?.isEmpty == false {
+                conditions.append("account_alias = ?")
+            }
+            if filter.model?.isEmpty == false {
+                conditions.append("model = ?")
+            }
+            if filter.threadQuery?.isEmpty == false {
+                conditions.append("(thread_id LIKE ? OR task_title_masked LIKE ?)")
+            }
+            if filter.source != nil {
+                conditions.append("source = ?")
+            }
+            if filter.dateFrom != nil {
+                conditions.append("event_time >= ?")
+            }
+            if filter.dateTo != nil {
+                conditions.append("event_time <= ?")
+            }
+
+            let whereClause = conditions.isEmpty
+                ? ""
+                : "WHERE " + conditions.joined(separator: " AND ")
             let sql = """
                 SELECT event_id, account_alias, thread_id, task_title_masked,
                        event_time, model, input_tokens_delta, cached_input_tokens_delta,
                        output_tokens_delta, reasoning_output_tokens_delta,
                        estimated_credits_delta, rate_card_version, source
                 FROM usage_events
+                \(whereClause)
                 ORDER BY event_time DESC
                 LIMIT ?
                 """
@@ -325,7 +353,35 @@ public struct SQLiteUsageEventRepository: Sendable {
                 sqlite3_finalize(statement)
             }
 
-            bindInt64(statement, index: 1, value: Int64(limit))
+            var bindIndex: Int32 = 1
+            if let accountAlias = nonEmpty(filter.accountAlias) {
+                bindText(statement, index: bindIndex, value: accountAlias)
+                bindIndex += 1
+            }
+            if let model = nonEmpty(filter.model) {
+                bindText(statement, index: bindIndex, value: model)
+                bindIndex += 1
+            }
+            if let threadQuery = nonEmpty(filter.threadQuery) {
+                let likeValue = "%\(threadQuery)%"
+                bindText(statement, index: bindIndex, value: likeValue)
+                bindIndex += 1
+                bindText(statement, index: bindIndex, value: likeValue)
+                bindIndex += 1
+            }
+            if let source = filter.source {
+                bindText(statement, index: bindIndex, value: source.rawValue)
+                bindIndex += 1
+            }
+            if let dateFrom = filter.dateFrom {
+                bindDouble(statement, index: bindIndex, value: dateFrom.timeIntervalSince1970)
+                bindIndex += 1
+            }
+            if let dateTo = filter.dateTo {
+                bindDouble(statement, index: bindIndex, value: dateTo.timeIntervalSince1970)
+                bindIndex += 1
+            }
+            bindInt64(statement, index: bindIndex, value: Int64(max(1, filter.limit)))
 
             var events: [UsageEvent] = []
             while sqlite3_step(statement) == SQLITE_ROW {
@@ -354,6 +410,14 @@ public struct SQLiteUsageEventRepository: Sendable {
             rateCardVersion: columnText(statement, index: 11),
             source: UsageEventSource(rawValue: sourceRaw) ?? .manual
         )
+    }
+
+    private func nonEmpty(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
@@ -403,11 +467,29 @@ public struct SQLiteAuditRepository: Sendable {
     }
 
     public func recent(limit: Int = 100) throws -> [AuditEvent] {
+        try query(.init(limit: limit))
+    }
+
+    public func query(_ filter: AuditEventFilter) throws -> [AuditEvent] {
         try store.withDatabase { db in
+            var conditions: [String] = []
+            if filter.eventType != nil {
+                conditions.append("event_type = ?")
+            }
+            if filter.result != nil {
+                conditions.append("result = ?")
+            }
+            if filter.query?.isEmpty == false {
+                conditions.append("(message LIKE ? OR object_type LIKE ? OR object_id LIKE ?)")
+            }
+            let whereClause = conditions.isEmpty
+                ? ""
+                : "WHERE " + conditions.joined(separator: " AND ")
             let sql = """
                 SELECT audit_id, event_type, actor, object_type, object_id,
                        result, message, created_at
                 FROM audit_events
+                \(whereClause)
                 ORDER BY created_at DESC
                 LIMIT ?
                 """
@@ -419,7 +501,25 @@ public struct SQLiteAuditRepository: Sendable {
                 sqlite3_finalize(statement)
             }
 
-            bindInt64(statement, index: 1, value: Int64(limit))
+            var bindIndex: Int32 = 1
+            if let eventType = filter.eventType {
+                bindText(statement, index: bindIndex, value: eventType.rawValue)
+                bindIndex += 1
+            }
+            if let result = filter.result {
+                bindText(statement, index: bindIndex, value: result.rawValue)
+                bindIndex += 1
+            }
+            if let query = nonEmpty(filter.query) {
+                let likeValue = "%\(query)%"
+                bindText(statement, index: bindIndex, value: likeValue)
+                bindIndex += 1
+                bindText(statement, index: bindIndex, value: likeValue)
+                bindIndex += 1
+                bindText(statement, index: bindIndex, value: likeValue)
+                bindIndex += 1
+            }
+            bindInt64(statement, index: bindIndex, value: Int64(max(1, filter.limit)))
 
             var events: [AuditEvent] = []
             while sqlite3_step(statement) == SQLITE_ROW {
@@ -444,6 +544,14 @@ public struct SQLiteAuditRepository: Sendable {
             message: columnText(statement, index: 6),
             createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 7))
         )
+    }
+
+    private func nonEmpty(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 

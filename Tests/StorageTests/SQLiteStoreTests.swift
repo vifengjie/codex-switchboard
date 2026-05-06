@@ -182,6 +182,47 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(try repository.recent(limit: 1).count, 1)
     }
 
+    func testAuditRepositoryFiltersByTypeResultAndQuery() throws {
+        let store = SQLiteStore(databaseURL: makeTemporaryDatabaseURL())
+        try store.migrate()
+        let repository = SQLiteAuditRepository(store: store)
+
+        try repository.record(
+            AuditEvent(
+                eventType: .export,
+                actorName: "tester",
+                objectType: "usage_events",
+                objectID: "csv",
+                result: .success,
+                message: "导出 usage csv"
+            )
+        )
+        try repository.record(
+            AuditEvent(
+                eventType: .cleanup,
+                actorName: "tester",
+                objectType: "storage",
+                objectID: "local",
+                result: .failed,
+                message: "cleanup failed"
+            )
+        )
+
+        let filtered = try repository.query(
+            AuditEventFilter(
+                eventType: .export,
+                result: .success,
+                query: "usage",
+                limit: 20
+            )
+        )
+
+        XCTAssertEqual(filtered.count, 1)
+        XCTAssertEqual(filtered.first?.eventType, .export)
+        XCTAssertEqual(filtered.first?.result, .success)
+        XCTAssertEqual(filtered.first?.objectType, "usage_events")
+    }
+
     func testUsageEventRepositoryPersistsRecentEvents() throws {
         let store = SQLiteStore(databaseURL: makeTemporaryDatabaseURL())
         try store.migrate()
@@ -266,6 +307,71 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(events.first?.accountAlias, "updated")
         XCTAssertEqual(events.first?.inputMTokensDelta, 2)
         XCTAssertEqual(events.first?.source, .localJSONL)
+    }
+
+    func testUsageEventRepositoryFiltersByAccountModelThreadSourceAndTime() throws {
+        let store = SQLiteStore(databaseURL: makeTemporaryDatabaseURL())
+        try store.migrate()
+        let repository = SQLiteUsageEventRepository(store: store)
+        let matching = UsageEvent(
+            accountAlias: "主账号",
+            threadID: "thread-abc",
+            taskTitleMasked: "quota investigate",
+            eventTime: Date(timeIntervalSince1970: 500),
+            model: "gpt-5",
+            inputTokensDelta: 1_000_000,
+            source: .localJSONL
+        )
+        let differentAccount = UsageEvent(
+            accountAlias: "备用账号",
+            threadID: "thread-abc",
+            taskTitleMasked: "quota investigate",
+            eventTime: Date(timeIntervalSince1970: 500),
+            model: "gpt-5",
+            inputTokensDelta: 1_000_000,
+            source: .localJSONL
+        )
+        let differentModel = UsageEvent(
+            accountAlias: "主账号",
+            threadID: "thread-abc",
+            taskTitleMasked: "quota investigate",
+            eventTime: Date(timeIntervalSince1970: 500),
+            model: "gpt-4.1",
+            inputTokensDelta: 1_000_000,
+            source: .localJSONL
+        )
+        let differentSource = UsageEvent(
+            accountAlias: "主账号",
+            threadID: "thread-xyz",
+            taskTitleMasked: "manual import",
+            eventTime: Date(timeIntervalSince1970: 900),
+            model: "gpt-5",
+            inputTokensDelta: 1_000_000,
+            source: .manual
+        )
+
+        try repository.save(matching)
+        try repository.save(differentAccount)
+        try repository.save(differentModel)
+        try repository.save(differentSource)
+
+        let filtered = try repository.query(
+            UsageEventFilter(
+                accountAlias: "主账号",
+                model: "gpt-5",
+                threadQuery: "investigate",
+                source: .localJSONL,
+                dateFrom: Date(timeIntervalSince1970: 400),
+                dateTo: Date(timeIntervalSince1970: 800),
+                limit: 50
+            )
+        )
+
+        XCTAssertEqual(filtered.count, 1)
+        XCTAssertEqual(filtered.first?.accountAlias, "主账号")
+        XCTAssertEqual(filtered.first?.model, "gpt-5")
+        XCTAssertEqual(filtered.first?.threadID, "thread-abc")
+        XCTAssertEqual(filtered.first?.source, .localJSONL)
     }
 
     func testSnapshotRepositoryReturnsLatestSnapshot() throws {
@@ -423,6 +529,58 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(events.first?.reason, .userRequested)
         XCTAssertEqual(events.first?.providerName, "official_login")
         XCTAssertEqual(events.first?.message, "stale")
+    }
+
+    func testMaintenanceRepositoryCleansSelectedTables() throws {
+        let store = SQLiteStore(databaseURL: makeTemporaryDatabaseURL())
+        try store.migrate()
+        let usageRepository = SQLiteUsageEventRepository(store: store)
+        let snapshotRepository = SQLiteSnapshotRepository(store: store)
+        let offsetRepository = SQLiteCollectorOffsetRepository(store: store)
+        let auditRepository = SQLiteAuditRepository(store: store)
+        let accountRepository = SQLiteAccountRepository(store: store)
+        let maintenanceRepository = SQLiteMaintenanceRepository(store: store)
+
+        try usageRepository.save(UsageEvent(eventTime: Date(), inputTokensDelta: 1, source: .manual))
+        try snapshotRepository.save(
+            QuotaSnapshot(
+                accountAlias: "主账号",
+                fiveHourRemainingPercent: 50,
+                weeklyRemainingPercent: 60,
+                confidence: .observed
+            )
+        )
+        try offsetRepository.upsert(
+            CollectorOffset(fileID: "file", path: "/tmp/file", lastOffset: 1)
+        )
+        try auditRepository.record(
+            AuditEvent(eventType: .export, objectType: "usage_events", result: .success)
+        )
+        try accountRepository.upsert(
+            Account(alias: "主账号", keychainRef: "cleanup-ref")
+        )
+
+        try maintenanceRepository.performCleanup(
+            CleanupOptions(
+                clearUsageEvents: true,
+                clearSnapshots: true,
+                clearCollectorOffsets: true,
+                clearAlerts: false,
+                clearSwitchEvents: false,
+                clearAuditEvents: true,
+                clearAccounts: true,
+                clearKeychainSecrets: false,
+                resetSettings: false
+            ),
+            accountRepository: accountRepository,
+            keychainStore: KeychainStore(defaultService: "CodexQuotaManagerTests")
+        )
+
+        XCTAssertEqual(try usageRepository.recent(limit: 10).count, 0)
+        XCTAssertNil(try snapshotRepository.latestSnapshot())
+        XCTAssertEqual(try offsetRepository.recent(limit: 10).count, 0)
+        XCTAssertEqual(try auditRepository.recent(limit: 10).count, 0)
+        XCTAssertEqual(try accountRepository.listAccounts().count, 0)
     }
 
     private func makeTemporaryDatabaseURL() -> URL {

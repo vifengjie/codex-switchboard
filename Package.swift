@@ -27,6 +27,10 @@ let package = Package(
         .library(
             name: "CodexQuotaSwitch",
             targets: ["CodexQuotaSwitch"]
+        ),
+        .library(
+            name: "CodexQuotaExport",
+            targets: ["CodexQuotaExport"]
         )
     ],
     targets: [
@@ -36,7 +40,8 @@ let package = Package(
                 "CodexQuotaCore",
                 "CodexQuotaCollectors",
                 "CodexQuotaStorage",
-                "CodexQuotaSwitch"
+                "CodexQuotaSwitch",
+                "CodexQuotaExport"
             ],
             path: "App"
         ),
@@ -66,6 +71,11 @@ let package = Package(
             ],
             path: "Sources/Switch"
         ),
+        .target(
+            name: "CodexQuotaExport",
+            dependencies: ["CodexQuotaCore"],
+            path: "Sources/Export"
+        ),
         .testTarget(
             name: "CodexQuotaCoreTests",
             dependencies: ["CodexQuotaCore"],
@@ -91,6 +101,11 @@ let package = Package(
             name: "CodexQuotaSwitchTests",
             dependencies: ["CodexQuotaSwitch"],
             path: "Tests/SwitchTests"
+        ),
+        .testTarget(
+            name: "CodexQuotaExportTests",
+            dependencies: ["CodexQuotaExport"],
+            path: "Tests/ExportTests"
         )
     ]
 )

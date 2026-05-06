@@ -1,4 +1,5 @@
 import CodexQuotaCore
+import CodexQuotaExport
 import CodexQuotaSwitch
 import SwiftUI
 
@@ -31,15 +32,19 @@ struct ManagementRootView: View {
                 .tabItem { Text("账号") }
 
                 DetailsTab(events: viewModel.usageEvents)
+                    .environmentObject(viewModel)
                     .tabItem { Text("明细") }
 
                 PolicyTab(
                     settings: viewModel.settings,
-                    saveAction: viewModel.saveSettings(_:)
+                    saveAction: viewModel.saveSettings(_:),
+                    cleanupAction: viewModel.requestCleanup,
+                    diagnosticsAction: viewModel.exportDiagnostics
                 )
                 .tabItem { Text("策略") }
 
                 AuditTab(events: viewModel.auditEvents)
+                    .environmentObject(viewModel)
                     .tabItem { Text("审计") }
             }
             Divider()
@@ -82,6 +87,15 @@ struct ManagementRootView: View {
                 },
                 cancelAction: {
                     viewModel.completeActiveSwitchSession(userConfirmed: false)
+                }
+            )
+        }
+        .sheet(isPresented: $viewModel.showingCleanupSheet) {
+            CleanupSheet(
+                options: viewModel.pendingCleanupOptions,
+                confirmAction: viewModel.performCleanup(_:),
+                cancelAction: {
+                    viewModel.showingCleanupSheet = false
                 }
             )
         }
@@ -470,11 +484,20 @@ private struct SwitchCompletionSheet: View {
 private struct PolicyTab: View {
     let settings: AppSettings
     let saveAction: (AppSettings) -> Void
+    let cleanupAction: () -> Void
+    let diagnosticsAction: () -> Void
     @State private var draft: AppSettings
 
-    init(settings: AppSettings, saveAction: @escaping (AppSettings) -> Void) {
+    init(
+        settings: AppSettings,
+        saveAction: @escaping (AppSettings) -> Void,
+        cleanupAction: @escaping () -> Void,
+        diagnosticsAction: @escaping () -> Void
+    ) {
         self.settings = settings
         self.saveAction = saveAction
+        self.cleanupAction = cleanupAction
+        self.diagnosticsAction = diagnosticsAction
         self._draft = State(initialValue: settings)
     }
 
@@ -513,6 +536,8 @@ private struct PolicyTab: View {
                 Button("恢复当前值") {
                     draft = settings
                 }
+                Button("导出诊断", action: diagnosticsAction)
+                Button("清理数据", action: cleanupAction)
                 Spacer()
                 Button("保存策略") {
                     saveAction(draft)
@@ -529,12 +554,55 @@ private struct PolicyTab: View {
 }
 
 private struct DetailsTab: View {
+    @EnvironmentObject private var viewModel: ManagementViewModel
     let events: [UsageEvent]
+    @State private var draftFilter = UsageEventFilter.default
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("明细")
-                .font(.headline)
+            HStack {
+                Text("明细")
+                    .font(.headline)
+                Spacer()
+                Button("导出 CSV") {
+                    viewModel.exportUsageEvents(format: .csv)
+                }
+                Button("导出 JSON") {
+                    viewModel.exportUsageEvents(format: .json)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 12) {
+                    TextField("账号", text: binding(for: \.accountAlias))
+                    TextField("模型", text: binding(for: \.model))
+                    Picker("来源", selection: $draftFilter.source) {
+                        Text("全部").tag(UsageEventSource?.none)
+                        ForEach(sourceOptions(), id: \.self) { value in
+                            Text(value.rawValue).tag(Optional(value))
+                        }
+                    }
+                }
+                HStack(spacing: 12) {
+                    TextField("线程 / 标题", text: binding(for: \.threadQuery))
+                    DatePicker("开始", selection: binding(for: \.dateFrom, defaultValue: Date()), displayedComponents: [.date, .hourAndMinute])
+                    Toggle("启用", isOn: hasDateFromBinding)
+                    DatePicker("结束", selection: binding(for: \.dateTo, defaultValue: Date()), displayedComponents: [.date, .hourAndMinute])
+                    Toggle("启用", isOn: hasDateToBinding)
+                }
+                HStack {
+                    Stepper("数量：\(draftFilter.limit)", value: $draftFilter.limit, in: 10...2000, step: 10)
+                    Spacer()
+                    Button("重置筛选") {
+                        draftFilter = .default
+                        viewModel.resetUsageFilter()
+                    }
+                    Button("应用筛选") {
+                        viewModel.applyUsageFilter(normalizedFilter())
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
 
             if events.isEmpty {
                 ContentUnavailableView("暂无用量明细", systemImage: "tablecells", description: Text("M2 接入本地采集器后会写入 usage events"))
@@ -570,7 +638,10 @@ private struct DetailsTab: View {
                 }
             }
         }
-            .padding(20)
+        .padding(20)
+        .onAppear {
+            draftFilter = viewModel.usageFilter
+        }
     }
 
     private static func formatMTokens(_ value: Double) -> String {
@@ -598,15 +669,96 @@ private struct DetailsTab: View {
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return formatter
     }()
+
+    private func binding(for keyPath: WritableKeyPath<UsageEventFilter, String?>) -> Binding<String> {
+        Binding(
+            get: { draftFilter[keyPath: keyPath] ?? "" },
+            set: { draftFilter[keyPath: keyPath] = $0.isEmpty ? nil : $0 }
+        )
+    }
+
+    private func binding(for keyPath: WritableKeyPath<UsageEventFilter, Date?>, defaultValue: Date) -> Binding<Date> {
+        Binding(
+            get: { draftFilter[keyPath: keyPath] ?? defaultValue },
+            set: { draftFilter[keyPath: keyPath] = $0 }
+        )
+    }
+
+    private var hasDateFromBinding: Binding<Bool> {
+        Binding(
+            get: { draftFilter.dateFrom != nil },
+            set: { draftFilter.dateFrom = $0 ? (draftFilter.dateFrom ?? Date()) : nil }
+        )
+    }
+
+    private var hasDateToBinding: Binding<Bool> {
+        Binding(
+            get: { draftFilter.dateTo != nil },
+            set: { draftFilter.dateTo = $0 ? (draftFilter.dateTo ?? Date()) : nil }
+        )
+    }
+
+    private func normalizedFilter() -> UsageEventFilter {
+        UsageEventFilter(
+            accountAlias: normalizedText(draftFilter.accountAlias),
+            model: normalizedText(draftFilter.model),
+            threadQuery: normalizedText(draftFilter.threadQuery),
+            source: draftFilter.source,
+            dateFrom: draftFilter.dateFrom,
+            dateTo: draftFilter.dateTo,
+            limit: draftFilter.limit
+        )
+    }
+
+    private func normalizedText(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func sourceOptions() -> [UsageEventSource] {
+        [.localJSONL, .stateSQLite, .cliStatus, .officialAPI, .importedReport, .manual]
+    }
 }
 
 private struct AuditTab: View {
+    @EnvironmentObject private var viewModel: ManagementViewModel
     let events: [AuditEvent]
+    @State private var draftFilter = AuditEventFilter.default
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("审计")
-                .font(.headline)
+            HStack {
+                Text("审计")
+                    .font(.headline)
+                Spacer()
+            }
+
+            HStack(spacing: 12) {
+                Picker("事件", selection: $draftFilter.eventType) {
+                    Text("全部").tag(AuditEventType?.none)
+                    ForEach(AuditEventType.allCases, id: \.self) { value in
+                        Text(value.rawValue).tag(Optional(value))
+                    }
+                }
+                Picker("结果", selection: $draftFilter.result) {
+                    Text("全部").tag(AuditResult?.none)
+                    ForEach(AuditResult.allCases, id: \.self) { value in
+                        Text(value.rawValue).tag(Optional(value))
+                    }
+                }
+                TextField("对象 / 说明", text: binding(for: \.query))
+                Stepper("数量：\(draftFilter.limit)", value: $draftFilter.limit, in: 10...1000, step: 10)
+                Button("重置筛选") {
+                    draftFilter = .default
+                    viewModel.resetAuditFilter()
+                }
+                Button("应用筛选") {
+                    viewModel.applyAuditFilter(normalizedFilter())
+                }
+            }
 
             if events.isEmpty {
                 ContentUnavailableView("暂无审计记录", systemImage: "list.bullet.clipboard", description: Text("账号新增、启用/禁用、删除会写入本地审计"))
@@ -631,6 +783,9 @@ private struct AuditTab: View {
             }
         }
         .padding(20)
+        .onAppear {
+            draftFilter = viewModel.auditFilter
+        }
     }
 
     private static let dateFormatter: DateFormatter = {
@@ -638,6 +793,81 @@ private struct AuditTab: View {
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return formatter
     }()
+
+    private func binding(for keyPath: WritableKeyPath<AuditEventFilter, String?>) -> Binding<String> {
+        Binding(
+            get: { draftFilter[keyPath: keyPath] ?? "" },
+            set: { draftFilter[keyPath: keyPath] = $0.isEmpty ? nil : $0 }
+        )
+    }
+
+    private func normalizedFilter() -> AuditEventFilter {
+        AuditEventFilter(
+            eventType: draftFilter.eventType,
+            result: draftFilter.result,
+            query: normalizedText(draftFilter.query),
+            limit: draftFilter.limit
+        )
+    }
+
+    private func normalizedText(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+private struct CleanupSheet: View {
+    @State private var options: CleanupOptions
+    let confirmAction: (CleanupOptions) -> Void
+    let cancelAction: () -> Void
+
+    init(
+        options: CleanupOptions,
+        confirmAction: @escaping (CleanupOptions) -> Void,
+        cancelAction: @escaping () -> Void
+    ) {
+        self._options = State(initialValue: options)
+        self.confirmAction = confirmAction
+        self.cancelAction = cancelAction
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("清理数据")
+                .font(.headline)
+
+            Form {
+                Toggle("清理明细 events", isOn: $options.clearUsageEvents)
+                Toggle("清理 quota snapshots", isOn: $options.clearSnapshots)
+                Toggle("清理 collector offsets", isOn: $options.clearCollectorOffsets)
+                Toggle("清理 alerts", isOn: $options.clearAlerts)
+                Toggle("清理 switch events", isOn: $options.clearSwitchEvents)
+                Toggle("清理 audit events", isOn: $options.clearAuditEvents)
+                Toggle("清理账号元数据", isOn: $options.clearAccounts)
+                Toggle("删除 Keychain 引用", isOn: $options.clearKeychainSecrets)
+                    .disabled(!options.clearAccounts)
+                Toggle("重置设置为默认值", isOn: $options.resetSettings)
+            }
+
+            Text("只会清理本应用自己的 SQLite 和 Keychain 引用，不会读取、复制或删除 Codex 自身 auth 文件。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Button("取消", action: cancelAction)
+                Spacer()
+                Button("确认清理") {
+                    confirmAction(options)
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
 }
 
 private struct Metric: View {
