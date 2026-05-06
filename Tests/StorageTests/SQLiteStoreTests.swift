@@ -58,12 +58,17 @@ final class SQLiteStoreTests: XCTestCase {
         )
         let highPriority = Account(
             alias: "主账号",
+            provider: .chatgpt,
             workspaceName: "Business-A",
             emailMasked: "a***@example.com",
             planType: .business,
+            seatType: .codex,
+            authMethod: .chatgpt,
             authStatus: .active,
+            keychainRef: "codex-quota-manager.account.primary",
             enabled: true,
-            priority: 10
+            priority: 10,
+            lastSwitchedAt: Date(timeIntervalSince1970: 300)
         )
 
         try repository.upsert(lowPriority)
@@ -73,8 +78,13 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(accounts.map(\.alias), ["主账号", "备用账号"])
         XCTAssertEqual(accounts.first?.workspaceName, "Business-A")
         XCTAssertEqual(accounts.first?.emailMasked, "a***@example.com")
+        XCTAssertEqual(accounts.first?.provider, .chatgpt)
         XCTAssertEqual(accounts.first?.planType, .business)
+        XCTAssertEqual(accounts.first?.seatType, .codex)
+        XCTAssertEqual(accounts.first?.authMethod, .chatgpt)
         XCTAssertEqual(accounts.first?.authStatus, .active)
+        XCTAssertEqual(accounts.first?.keychainRef, "codex-quota-manager.account.primary")
+        XCTAssertEqual(accounts.first?.lastSwitchedAt?.timeIntervalSince1970, 300)
     }
 
     func testAccountRepositoryUpdatesAndDeletesAccount() throws {
@@ -104,6 +114,24 @@ final class SQLiteStoreTests: XCTestCase {
 
         try repository.delete(id: id)
         XCTAssertNil(try repository.account(id: id))
+    }
+
+    func testKeychainStoreSavesReadsAndDeletesSecrets() throws {
+        let keychain = KeychainStore(defaultService: "CodexQuotaManagerTests.\(UUID().uuidString)")
+        let reference = keychain.accountReference(accountID: UUID())
+        let secret = Data("secret-token".utf8)
+        defer {
+            _ = try? keychain.deleteSecret(reference: reference)
+        }
+
+        do {
+            try keychain.saveSecret(secret, reference: reference)
+            XCTAssertEqual(try keychain.readSecret(reference: reference), secret)
+            XCTAssertTrue(try keychain.deleteSecret(reference: reference))
+            XCTAssertNil(try keychain.readSecret(reference: reference))
+        } catch {
+            throw XCTSkip("Keychain unavailable in this test environment: \(error)")
+        }
     }
 
     func testAuditRepositoryRecordsRecentEvents() throws {
@@ -352,6 +380,49 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(try repository.lastDelivered(dedupeKey: "主账号|five_hour_risk")?.deliveredAt?.timeIntervalSince1970, 220)
         XCTAssertEqual(try repository.lastEvent(dedupeKey: "主账号|five_hour_risk")?.result, .delivered)
         XCTAssertNil(try repository.lastDelivered(dedupeKey: "missing"))
+    }
+
+    func testSwitchEventRepositoryPersistsRecentEvents() throws {
+        let store = SQLiteStore(databaseURL: makeTemporaryDatabaseURL())
+        try store.migrate()
+        let repository = SQLiteSwitchEventRepository(store: store)
+        let fromID = UUID()
+        let toID = UUID()
+        let older = SwitchEvent(
+            fromAccountID: fromID,
+            fromAccountAlias: "主账号",
+            toAccountID: toID,
+            toAccountAlias: "备用账号",
+            reason: .recommendation,
+            providerName: "official_login",
+            result: .cancelled,
+            message: "cancelled",
+            createdAt: Date(timeIntervalSince1970: 100)
+        )
+        let newer = SwitchEvent(
+            fromAccountID: fromID,
+            fromAccountAlias: "主账号",
+            toAccountID: toID,
+            toAccountAlias: "备用账号",
+            reason: .userRequested,
+            providerName: "official_login",
+            result: .staleSucceeded,
+            message: "stale",
+            createdAt: Date(timeIntervalSince1970: 200)
+        )
+
+        try repository.record(older)
+        try repository.record(newer)
+        let events = try repository.recent(limit: 10)
+
+        XCTAssertEqual(events.map(\.result), [.staleSucceeded, .cancelled])
+        XCTAssertEqual(events.first?.fromAccountID, fromID)
+        XCTAssertEqual(events.first?.fromAccountAlias, "主账号")
+        XCTAssertEqual(events.first?.toAccountID, toID)
+        XCTAssertEqual(events.first?.toAccountAlias, "备用账号")
+        XCTAssertEqual(events.first?.reason, .userRequested)
+        XCTAssertEqual(events.first?.providerName, "official_login")
+        XCTAssertEqual(events.first?.message, "stale")
     }
 
     private func makeTemporaryDatabaseURL() -> URL {

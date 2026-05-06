@@ -2,7 +2,7 @@
 
 Codex Quota Manager is a macOS menu bar app for local Codex quota visibility, token usage review, low-quota alerts, and user-confirmed account switching.
 
-This repository is currently in early M1 stage.
+This repository is currently in the M4 multi-account and user-confirmed switching slice.
 
 ## Development
 
@@ -47,7 +47,7 @@ Current scaffold status:
 
 - Full Xcode is selected.
 - `swift build` passes.
-- `swift test` passes.
+- `swift test` passes with 41 tests.
 - The menu bar app loads its startup state from SQLite-backed settings and quota snapshot repositories.
 
 Check whether the workspace is ready to enter M1:
@@ -62,7 +62,7 @@ The script requires full Xcode. If it reports that Command Line Tools are active
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 ```
 
-## Current M1 Slice
+## Current MVP Slice
 
 Implemented:
 
@@ -83,6 +83,12 @@ Implemented:
 - Account add, enable/disable, and delete actions write audit events.
 - Policy settings are editable and persisted to SQLite.
 - Policy save actions write `settings_update` audit events.
+- M4 account metadata fields: provider, seat type, auth method, Keychain reference, and last switched time.
+- `KeychainStore` stores, reads, and deletes secrets via macOS Keychain; SQLite stores only the non-secret reference.
+- SQLite migration for `switch_events`.
+- `CodexQuotaSwitch` module with `AccountManager`, `OfficialLoginSwitchProvider`, and `SwitchCoordinator`.
+- User-confirmed switching flow in the management window: preflight, confirmation, official login launch, manual completion, forced refresh, switch events, and audit events.
+- Refresh failure after user-confirmed switching records `stale_succeeded` and saves a stale snapshot for the target account.
 
 ## Privacy Boundary
 

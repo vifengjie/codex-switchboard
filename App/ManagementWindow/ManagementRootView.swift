@@ -1,8 +1,10 @@
 import CodexQuotaCore
+import CodexQuotaSwitch
 import SwiftUI
 
 struct ManagementRootView: View {
     @StateObject private var viewModel = ManagementViewModel()
+    @State private var accountEditorDraft: AccountEditorDraft?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -16,9 +18,15 @@ struct ManagementRootView: View {
 
                 AccountsTab(
                     accounts: viewModel.accounts,
-                    addAction: viewModel.addLocalAccount,
+                    addAction: {
+                        accountEditorDraft = .new(nextIndex: viewModel.accounts.count + 1)
+                    },
+                    editAction: { account in
+                        accountEditorDraft = AccountEditorDraft(account: account)
+                    },
                     toggleAction: viewModel.toggleEnabled(account:),
-                    deleteAction: viewModel.delete(account:)
+                    deleteAction: viewModel.delete(account:),
+                    switchAction: viewModel.prepareSwitch(account:)
                 )
                 .tabItem { Text("账号") }
 
@@ -47,6 +55,36 @@ struct ManagementRootView: View {
             .padding(.vertical, 10)
         }
         .frame(minWidth: 760, minHeight: 480)
+        .sheet(item: $accountEditorDraft) { draft in
+            AccountEditorSheet(
+                draft: draft,
+                saveAction: { account in
+                    viewModel.saveAccount(account)
+                    accountEditorDraft = nil
+                },
+                cancelAction: {
+                    accountEditorDraft = nil
+                }
+            )
+        }
+        .sheet(item: $viewModel.pendingSwitchPreflight) { preflight in
+            SwitchConfirmationSheet(
+                preflight: preflight,
+                confirmAction: viewModel.launchPreparedSwitch,
+                cancelAction: viewModel.cancelPreparedSwitch
+            )
+        }
+        .sheet(item: $viewModel.activeSwitchSession) { session in
+            SwitchCompletionSheet(
+                session: session,
+                completeAction: {
+                    viewModel.completeActiveSwitchSession(userConfirmed: true)
+                },
+                cancelAction: {
+                    viewModel.completeActiveSwitchSession(userConfirmed: false)
+                }
+            )
+        }
     }
 }
 
@@ -91,8 +129,10 @@ private struct OverviewTab: View {
 private struct AccountsTab: View {
     let accounts: [Account]
     let addAction: () -> Void
+    let editAction: (Account) -> Void
     let toggleAction: (Account) -> Void
     let deleteAction: (Account) -> Void
+    let switchAction: (Account) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -128,13 +168,302 @@ private struct AccountsTab: View {
                     }
                 }
                 TableColumn("操作") { account in
-                    Button("删除") {
-                        deleteAction(account)
+                    HStack(spacing: 8) {
+                        Button("编辑") {
+                            editAction(account)
+                        }
+                        Button("切换") {
+                            switchAction(account)
+                        }
+                        Button("删除") {
+                            deleteAction(account)
+                        }
                     }
                 }
             }
         }
         .padding(20)
+    }
+}
+
+private struct AccountEditorDraft: Identifiable {
+    let id: UUID
+    var isNew: Bool
+    var alias: String
+    var provider: AccountProvider
+    var workspaceName: String
+    var emailMasked: String
+    var planType: PlanType
+    var seatType: SeatType
+    var authMethod: AuthMethod
+    var authStatus: AuthStatus
+    var keychainRef: String
+    var enabled: Bool
+    var priority: Int
+    var lastSwitchedAt: Date?
+
+    static func new(nextIndex: Int) -> AccountEditorDraft {
+        AccountEditorDraft(
+            id: UUID(),
+            isNew: true,
+            alias: "本地账号 \(nextIndex)",
+            provider: .chatgpt,
+            workspaceName: "",
+            emailMasked: "",
+            planType: .unknown,
+            seatType: .unknown,
+            authMethod: .unknown,
+            authStatus: .unknown,
+            keychainRef: "",
+            enabled: true,
+            priority: max(0, 100 - nextIndex),
+            lastSwitchedAt: nil
+        )
+    }
+
+    init(account: Account) {
+        self.id = account.id
+        self.isNew = false
+        self.alias = account.alias
+        self.provider = account.provider
+        self.workspaceName = account.workspaceName ?? ""
+        self.emailMasked = account.emailMasked ?? ""
+        self.planType = account.planType
+        self.seatType = account.seatType
+        self.authMethod = account.authMethod
+        self.authStatus = account.authStatus
+        self.keychainRef = account.keychainRef ?? ""
+        self.enabled = account.enabled
+        self.priority = account.priority
+        self.lastSwitchedAt = account.lastSwitchedAt
+    }
+
+    private init(
+        id: UUID,
+        isNew: Bool,
+        alias: String,
+        provider: AccountProvider,
+        workspaceName: String,
+        emailMasked: String,
+        planType: PlanType,
+        seatType: SeatType,
+        authMethod: AuthMethod,
+        authStatus: AuthStatus,
+        keychainRef: String,
+        enabled: Bool,
+        priority: Int,
+        lastSwitchedAt: Date?
+    ) {
+        self.id = id
+        self.isNew = isNew
+        self.alias = alias
+        self.provider = provider
+        self.workspaceName = workspaceName
+        self.emailMasked = emailMasked
+        self.planType = planType
+        self.seatType = seatType
+        self.authMethod = authMethod
+        self.authStatus = authStatus
+        self.keychainRef = keychainRef
+        self.enabled = enabled
+        self.priority = priority
+        self.lastSwitchedAt = lastSwitchedAt
+    }
+
+    var canSave: Bool {
+        !alias.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var account: Account {
+        Account(
+            id: id,
+            alias: alias.trimmingCharacters(in: .whitespacesAndNewlines),
+            provider: provider,
+            workspaceName: optionalText(workspaceName),
+            emailMasked: optionalText(emailMasked),
+            planType: planType,
+            seatType: seatType,
+            authMethod: authMethod,
+            authStatus: authStatus,
+            keychainRef: optionalText(keychainRef),
+            enabled: enabled,
+            priority: priority,
+            lastSwitchedAt: lastSwitchedAt
+        )
+    }
+
+    private func optionalText(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+private struct AccountEditorSheet: View {
+    @State private var draft: AccountEditorDraft
+    let saveAction: (Account) -> Void
+    let cancelAction: () -> Void
+
+    init(
+        draft: AccountEditorDraft,
+        saveAction: @escaping (Account) -> Void,
+        cancelAction: @escaping () -> Void
+    ) {
+        self._draft = State(initialValue: draft)
+        self.saveAction = saveAction
+        self.cancelAction = cancelAction
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(draft.isNew ? "添加账号" : "编辑账号")
+                .font(.headline)
+
+            Form {
+                TextField("别名", text: $draft.alias)
+                TextField("Workspace", text: $draft.workspaceName)
+                TextField("邮箱（脱敏）", text: $draft.emailMasked)
+                Picker("Provider", selection: $draft.provider) {
+                    ForEach(AccountProvider.allCases, id: \.self) { value in
+                        Text(value.rawValue).tag(value)
+                    }
+                }
+                Picker("Plan", selection: $draft.planType) {
+                    ForEach(PlanType.allCases, id: \.self) { value in
+                        Text(value.rawValue).tag(value)
+                    }
+                }
+                Picker("Seat", selection: $draft.seatType) {
+                    ForEach(SeatType.allCases, id: \.self) { value in
+                        Text(value.rawValue).tag(value)
+                    }
+                }
+                Picker("授权方式", selection: $draft.authMethod) {
+                    ForEach(AuthMethod.allCases, id: \.self) { value in
+                        Text(value.rawValue).tag(value)
+                    }
+                }
+                Picker("授权状态", selection: $draft.authStatus) {
+                    ForEach(AuthStatus.allCases, id: \.self) { value in
+                        Text(value.rawValue).tag(value)
+                    }
+                }
+                TextField("Keychain 引用", text: $draft.keychainRef)
+                Stepper("优先级：\(draft.priority)", value: $draft.priority, in: 0...999, step: 1)
+                Toggle("启用", isOn: $draft.enabled)
+            }
+
+            HStack {
+                Button("取消", action: cancelAction)
+                Spacer()
+                Button("保存") {
+                    saveAction(draft.account)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!draft.canSave)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+    }
+}
+
+private struct SwitchConfirmationSheet: View {
+    let preflight: SwitchPreflight
+    let confirmAction: () -> Void
+    let cancelAction: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("确认切换账号")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("当前账号：\(preflight.fromAccount?.alias ?? preflight.currentSnapshot?.accountAlias ?? "未设置")")
+                Text("目标账号：\(preflight.targetAccount.alias)")
+                Text("目标额度：\(quotaLine(preflight.targetSnapshot))")
+                Text("授权状态：\(preflight.targetAccount.authStatus.rawValue)")
+            }
+
+            if !preflight.warnings.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("注意")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    ForEach(preflight.warnings, id: \.rawValue) { warning in
+                        Text(warningText(warning))
+                    }
+                }
+                .foregroundStyle(.secondary)
+            }
+
+            Text(preflight.privacyNotice)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Button("取消", action: cancelAction)
+                Spacer()
+                Button("打开官方流程", action: confirmAction)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
+
+    private func quotaLine(_ snapshot: QuotaSnapshot?) -> String {
+        guard let snapshot else {
+            return "--"
+        }
+        return "5H \(formatPercent(snapshot.fiveHourRemainingPercent)) / 1W \(formatPercent(snapshot.weeklyRemainingPercent))"
+    }
+
+    private func formatPercent(_ value: Double?) -> String {
+        guard let value else {
+            return "--"
+        }
+        return "\(Int(value.rounded()))%"
+    }
+
+    private func warningText(_ warning: SwitchPreflightWarning) -> String {
+        switch warning {
+        case .authorizationUnknown:
+            return "授权状态未知，完成官方流程后会按用户确认刷新。"
+        case .snapshotMissing:
+            return "目标账号暂无额度快照，切换后会强制刷新。"
+        case .snapshotStale:
+            return "目标账号快照已过期，切换后会强制刷新。"
+        }
+    }
+}
+
+private struct SwitchCompletionSheet: View {
+    let session: SwitchSession
+    let completeAction: () -> Void
+    let cancelAction: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("完成官方流程")
+                .font(.headline)
+            Text("目标账号：\(session.preflight.targetAccount.alias)")
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(session.launch.instructions, id: \.self) { instruction in
+                    Text(instruction)
+                }
+            }
+            .foregroundStyle(.secondary)
+
+            HStack {
+                Button("取消切换", action: cancelAction)
+                Spacer()
+                Button("我已完成切换", action: completeAction)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
     }
 }
 

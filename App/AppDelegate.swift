@@ -1,5 +1,4 @@
 import AppKit
-import CodexQuotaCollectors
 import CodexQuotaCore
 import CodexQuotaStorage
 
@@ -80,46 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private nonisolated static func runLocalCollectors() async throws -> QuotaSnapshot {
-        let store = SQLiteStore(databaseURL: try defaultDatabaseURL())
-        try store.migrate()
-
-        let settingsRepository = SQLiteSettingsRepository(store: store)
-        _ = try settingsRepository.ensureDefaultSettings()
-
-        let usageRepository = SQLiteUsageEventRepository(store: store)
-        let snapshotRepository = SQLiteSnapshotRepository(store: store)
-        let offsetRepository = SQLiteCollectorOffsetRepository(store: store)
-
-        let codexRoot = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".codex")
-        let stateCollector = CodexStateSQLiteCollector(
-            databaseURL: codexRoot.appending(path: "state_5.sqlite")
-        )
-        let threads = (try? stateCollector.listThreads()) ?? []
-        let rolloutURLs = threads
-            .map(\.rolloutPath)
-            .filter { !$0.isEmpty }
-            .map { URL(fileURLWithPath: $0) }
-        let metadataByRolloutPath = Dictionary(
-            threads.map { (URL(fileURLWithPath: $0.rolloutPath).standardizedFileURL.path, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        let jsonlCollector = LocalJSONLCollector(
-            rootDirectory: codexRoot,
-            rolloutPaths: rolloutURLs,
-            threadMetadataByRolloutPath: metadataByRolloutPath,
-            rateCardManager: .builtIn,
-            usageEventRepository: usageRepository,
-            snapshotRepository: snapshotRepository,
-            offsetRepository: offsetRepository
-        )
-        _ = try await jsonlCollector.collect()
-
-        if let snapshot = try snapshotRepository.latestSnapshot() {
-            return snapshot
-        }
-        let initialSnapshot = QuotaSnapshot.unconfigured
-        try snapshotRepository.save(initialSnapshot)
-        return initialSnapshot
+        try await LocalQuotaRefreshService.collectLatestSnapshot()
     }
 
     private nonisolated static func defaultDatabaseURL() throws -> URL {

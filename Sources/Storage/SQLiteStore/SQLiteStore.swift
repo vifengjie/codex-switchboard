@@ -43,12 +43,17 @@ public struct SQLiteStore: Sendable {
                 CREATE TABLE IF NOT EXISTS accounts (
                     account_id TEXT PRIMARY KEY,
                     alias TEXT NOT NULL,
+                    provider TEXT NOT NULL DEFAULT 'unknown',
                     workspace_name TEXT,
                     email_masked TEXT,
                     plan_type TEXT NOT NULL,
+                    seat_type TEXT NOT NULL DEFAULT 'unknown',
+                    auth_method TEXT NOT NULL DEFAULT 'unknown',
                     auth_status TEXT NOT NULL,
+                    keychain_ref TEXT,
                     enabled INTEGER NOT NULL,
                     priority INTEGER NOT NULL,
+                    last_switched_at REAL,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
@@ -136,6 +141,20 @@ public struct SQLiteStore: Sendable {
                 );
                 CREATE INDEX IF NOT EXISTS idx_alert_events_dedupe
                     ON alert_events(dedupe_key, delivered_at DESC, created_at DESC);
+                CREATE TABLE IF NOT EXISTS switch_events (
+                    switch_id TEXT PRIMARY KEY,
+                    from_account_id TEXT,
+                    from_account_alias TEXT,
+                    to_account_id TEXT NOT NULL,
+                    to_account_alias TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    provider_name TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    message TEXT,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_switch_events_created_at
+                    ON switch_events(created_at DESC);
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
                     VALUES (1, strftime('%s', 'now'));
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
@@ -146,8 +165,11 @@ public struct SQLiteStore: Sendable {
                     VALUES (4, strftime('%s', 'now'));
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
                     VALUES (5, strftime('%s', 'now'));
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (6, strftime('%s', 'now'));
                 """
             )
+            try ensureAccountColumns(db)
         }
     }
 
@@ -176,6 +198,41 @@ public struct SQLiteStore: Sendable {
             sqlite3_free(errorMessage)
             throw SQLiteStoreError.migrationFailed(message)
         }
+    }
+
+    private func ensureAccountColumns(_ db: OpaquePointer) throws {
+        let existingColumns = try accountColumnNames(db)
+        let additions = [
+            ("provider", "provider TEXT NOT NULL DEFAULT 'unknown'"),
+            ("seat_type", "seat_type TEXT NOT NULL DEFAULT 'unknown'"),
+            ("auth_method", "auth_method TEXT NOT NULL DEFAULT 'unknown'"),
+            ("keychain_ref", "keychain_ref TEXT"),
+            ("last_switched_at", "last_switched_at REAL")
+        ]
+
+        for addition in additions where !existingColumns.contains(addition.0) {
+            try execute(db, "ALTER TABLE accounts ADD COLUMN \(addition.1);")
+        }
+    }
+
+    private func accountColumnNames(_ db: OpaquePointer) throws -> Set<String> {
+        let sql = "PRAGMA table_info(accounts)"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw SQLiteStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer {
+            sqlite3_finalize(statement)
+        }
+
+        var columns = Set<String>()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let text = sqlite3_column_text(statement, 1) else {
+                continue
+            }
+            columns.insert(String(cString: text))
+        }
+        return columns
     }
 }
 
@@ -400,8 +457,9 @@ public struct SQLiteAccountRepository: Sendable {
     public func listAccounts() throws -> [Account] {
         try store.withDatabase { db in
             let sql = """
-                SELECT account_id, alias, workspace_name, email_masked,
-                       plan_type, auth_status, enabled, priority
+                SELECT account_id, alias, provider, workspace_name, email_masked,
+                       plan_type, seat_type, auth_method, auth_status, keychain_ref,
+                       enabled, priority, last_switched_at
                 FROM accounts
                 ORDER BY enabled DESC, priority DESC, alias ASC
                 """
@@ -424,8 +482,9 @@ public struct SQLiteAccountRepository: Sendable {
     public func account(id: UUID) throws -> Account? {
         try store.withDatabase { db in
             let sql = """
-                SELECT account_id, alias, workspace_name, email_masked,
-                       plan_type, auth_status, enabled, priority
+                SELECT account_id, alias, provider, workspace_name, email_masked,
+                       plan_type, seat_type, auth_method, auth_status, keychain_ref,
+                       enabled, priority, last_switched_at
                 FROM accounts
                 WHERE account_id = ?
                 LIMIT 1
@@ -451,19 +510,25 @@ public struct SQLiteAccountRepository: Sendable {
         try store.withDatabase { db in
             let sql = """
                 INSERT INTO accounts(
-                    account_id, alias, workspace_name, email_masked,
-                    plan_type, auth_status, enabled, priority,
+                    account_id, alias, provider, workspace_name, email_masked,
+                    plan_type, seat_type, auth_method, auth_status, keychain_ref,
+                    enabled, priority, last_switched_at,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id) DO UPDATE SET
                     alias = excluded.alias,
+                    provider = excluded.provider,
                     workspace_name = excluded.workspace_name,
                     email_masked = excluded.email_masked,
                     plan_type = excluded.plan_type,
+                    seat_type = excluded.seat_type,
+                    auth_method = excluded.auth_method,
                     auth_status = excluded.auth_status,
+                    keychain_ref = excluded.keychain_ref,
                     enabled = excluded.enabled,
                     priority = excluded.priority,
+                    last_switched_at = excluded.last_switched_at,
                     updated_at = excluded.updated_at
                 """
             var statement: OpaquePointer?
@@ -477,14 +542,19 @@ public struct SQLiteAccountRepository: Sendable {
             let now = Date().timeIntervalSince1970
             bindText(statement, index: 1, value: account.id.uuidString)
             bindText(statement, index: 2, value: account.alias)
-            bindOptionalText(statement, index: 3, value: account.workspaceName)
-            bindOptionalText(statement, index: 4, value: account.emailMasked)
-            bindText(statement, index: 5, value: account.planType.rawValue)
-            bindText(statement, index: 6, value: account.authStatus.rawValue)
-            bindBool(statement, index: 7, value: account.enabled)
-            bindInt64(statement, index: 8, value: Int64(account.priority))
-            bindDouble(statement, index: 9, value: now)
-            bindDouble(statement, index: 10, value: now)
+            bindText(statement, index: 3, value: account.provider.rawValue)
+            bindOptionalText(statement, index: 4, value: account.workspaceName)
+            bindOptionalText(statement, index: 5, value: account.emailMasked)
+            bindText(statement, index: 6, value: account.planType.rawValue)
+            bindText(statement, index: 7, value: account.seatType.rawValue)
+            bindText(statement, index: 8, value: account.authMethod.rawValue)
+            bindText(statement, index: 9, value: account.authStatus.rawValue)
+            bindOptionalText(statement, index: 10, value: account.keychainRef)
+            bindBool(statement, index: 11, value: account.enabled)
+            bindInt64(statement, index: 12, value: Int64(account.priority))
+            bindOptionalDouble(statement, index: 13, value: account.lastSwitchedAt?.timeIntervalSince1970)
+            bindDouble(statement, index: 14, value: now)
+            bindDouble(statement, index: 15, value: now)
 
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 throw SQLiteStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
@@ -514,18 +584,26 @@ public struct SQLiteAccountRepository: Sendable {
     private func readAccount(from statement: OpaquePointer?) -> Account {
         let idRaw = columnText(statement, index: 0) ?? UUID().uuidString
         let id = UUID(uuidString: idRaw) ?? UUID()
-        let planTypeRaw = columnText(statement, index: 4) ?? PlanType.unknown.rawValue
-        let authStatusRaw = columnText(statement, index: 5) ?? AuthStatus.unknown.rawValue
+        let providerRaw = columnText(statement, index: 2) ?? AccountProvider.unknown.rawValue
+        let planTypeRaw = columnText(statement, index: 5) ?? PlanType.unknown.rawValue
+        let seatTypeRaw = columnText(statement, index: 6) ?? SeatType.unknown.rawValue
+        let authMethodRaw = columnText(statement, index: 7) ?? AuthMethod.unknown.rawValue
+        let authStatusRaw = columnText(statement, index: 8) ?? AuthStatus.unknown.rawValue
 
         return Account(
             id: id,
             alias: columnText(statement, index: 1) ?? "未命名账号",
-            workspaceName: columnText(statement, index: 2),
-            emailMasked: columnText(statement, index: 3),
+            provider: AccountProvider(rawValue: providerRaw) ?? .unknown,
+            workspaceName: columnText(statement, index: 3),
+            emailMasked: columnText(statement, index: 4),
             planType: PlanType(rawValue: planTypeRaw) ?? .unknown,
+            seatType: SeatType(rawValue: seatTypeRaw) ?? .unknown,
+            authMethod: AuthMethod(rawValue: authMethodRaw) ?? .unknown,
             authStatus: AuthStatus(rawValue: authStatusRaw) ?? .unknown,
-            enabled: sqlite3_column_int(statement, 6) == 1,
-            priority: Int(sqlite3_column_int64(statement, 7))
+            keychainRef: columnText(statement, index: 9),
+            enabled: sqlite3_column_int(statement, 10) == 1,
+            priority: Int(sqlite3_column_int64(statement, 11)),
+            lastSwitchedAt: columnOptionalDate(statement, index: 12)
         )
     }
 }
@@ -643,30 +721,32 @@ public struct SQLiteSnapshotRepository: Sendable {
                 sqlite3_finalize(statement)
             }
 
-            let result = sqlite3_step(statement)
-            guard result == SQLITE_ROW else {
-                return nil
+            return readLatestSnapshot(from: statement)
+        }
+    }
+
+    public func latestSnapshot(accountAlias: String) throws -> QuotaSnapshot? {
+        try store.withDatabase { db in
+            let sql = """
+                SELECT account_alias, captured_at, five_hour_remaining_percent,
+                       weekly_remaining_percent, five_hour_resets_at, weekly_resets_at,
+                       confidence, input_tokens, cached_input_tokens, output_tokens,
+                       reasoning_output_tokens, estimated_credits
+                FROM quota_snapshots
+                WHERE account_alias = ?
+                ORDER BY captured_at DESC
+                LIMIT 1
+                """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw SQLiteStoreError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer {
+                sqlite3_finalize(statement)
             }
 
-            let confidenceRaw = columnText(statement, index: 6) ?? SnapshotConfidence.partial.rawValue
-            let confidence = SnapshotConfidence(rawValue: confidenceRaw) ?? .partial
-
-            return QuotaSnapshot(
-                accountAlias: columnText(statement, index: 0) ?? "未设置",
-                capturedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 1)),
-                fiveHourRemainingPercent: columnOptionalDouble(statement, index: 2),
-                weeklyRemainingPercent: columnOptionalDouble(statement, index: 3),
-                fiveHourResetsAt: columnOptionalDate(statement, index: 4),
-                weeklyResetsAt: columnOptionalDate(statement, index: 5),
-                confidence: confidence,
-                tokenUsage: TokenUsage(
-                    inputTokens: Int(sqlite3_column_int64(statement, 7)),
-                    cachedInputTokens: Int(sqlite3_column_int64(statement, 8)),
-                    outputTokens: Int(sqlite3_column_int64(statement, 9)),
-                    reasoningOutputTokens: Int(sqlite3_column_int64(statement, 10))
-                ),
-                estimatedCredits: columnOptionalDouble(statement, index: 11)
-            )
+            bindText(statement, index: 1, value: accountAlias)
+            return readLatestSnapshot(from: statement)
         }
     }
 
@@ -718,6 +798,33 @@ public struct SQLiteSnapshotRepository: Sendable {
                 throw SQLiteStoreError.stepFailed(String(cString: sqlite3_errmsg(db)))
             }
         }
+    }
+
+    private func readLatestSnapshot(from statement: OpaquePointer?) -> QuotaSnapshot? {
+        let result = sqlite3_step(statement)
+        guard result == SQLITE_ROW else {
+            return nil
+        }
+
+        let confidenceRaw = columnText(statement, index: 6) ?? SnapshotConfidence.partial.rawValue
+        let confidence = SnapshotConfidence(rawValue: confidenceRaw) ?? .partial
+
+        return QuotaSnapshot(
+            accountAlias: columnText(statement, index: 0) ?? "未设置",
+            capturedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 1)),
+            fiveHourRemainingPercent: columnOptionalDouble(statement, index: 2),
+            weeklyRemainingPercent: columnOptionalDouble(statement, index: 3),
+            fiveHourResetsAt: columnOptionalDate(statement, index: 4),
+            weeklyResetsAt: columnOptionalDate(statement, index: 5),
+            confidence: confidence,
+            tokenUsage: TokenUsage(
+                inputTokens: Int(sqlite3_column_int64(statement, 7)),
+                cachedInputTokens: Int(sqlite3_column_int64(statement, 8)),
+                outputTokens: Int(sqlite3_column_int64(statement, 9)),
+                reasoningOutputTokens: Int(sqlite3_column_int64(statement, 10))
+            ),
+            estimatedCredits: columnOptionalDouble(statement, index: 11)
+        )
     }
 }
 

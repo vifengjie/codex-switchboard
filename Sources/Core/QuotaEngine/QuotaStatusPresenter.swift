@@ -8,7 +8,9 @@ public struct QuotaStatusPresenter: Sendable {
             return "Cdx 未设置"
         }
 
-        if snapshot.confidence == .stale, snapshot.fiveHourRemainingPercent == nil {
+        if snapshot.confidence == .stale,
+           snapshot.fiveHourRemainingPercent == nil,
+           snapshot.accountAlias == QuotaSnapshot.mockRefreshing.accountAlias {
             return "Cdx 刷新中..."
         }
 

@@ -23,6 +23,10 @@ let package = Package(
         .library(
             name: "CodexQuotaStorage",
             targets: ["CodexQuotaStorage"]
+        ),
+        .library(
+            name: "CodexQuotaSwitch",
+            targets: ["CodexQuotaSwitch"]
         )
     ],
     targets: [
@@ -31,7 +35,8 @@ let package = Package(
             dependencies: [
                 "CodexQuotaCore",
                 "CodexQuotaCollectors",
-                "CodexQuotaStorage"
+                "CodexQuotaStorage",
+                "CodexQuotaSwitch"
             ],
             path: "App"
         ),
@@ -53,6 +58,14 @@ let package = Package(
             path: "Sources/Storage",
             exclude: ["Migrations/README.md"]
         ),
+        .target(
+            name: "CodexQuotaSwitch",
+            dependencies: [
+                "CodexQuotaCore",
+                "CodexQuotaStorage"
+            ],
+            path: "Sources/Switch"
+        ),
         .testTarget(
             name: "CodexQuotaCoreTests",
             dependencies: ["CodexQuotaCore"],
@@ -73,6 +86,11 @@ let package = Package(
             name: "CodexQuotaStorageTests",
             dependencies: ["CodexQuotaStorage"],
             path: "Tests/StorageTests"
+        ),
+        .testTarget(
+            name: "CodexQuotaSwitchTests",
+            dependencies: ["CodexQuotaSwitch"],
+            path: "Tests/SwitchTests"
         )
     ]
 )
