@@ -2,7 +2,7 @@
 
 Codex Quota Manager is a macOS menu bar app for local Codex quota visibility, token usage review, low-quota alerts, and user-confirmed account switching.
 
-The repository is currently in the `M4` multi-account and switching workflow slice. `M1` to `M4` are implemented locally on `main`; `M5` will focus on management window hardening, export, cleanup, and richer audit/detail workflows.
+The repository is currently in the `M5` management, export, cleanup, and diagnostics slice. `M1` to `M5` are implemented on `main`; `M6` will focus on packaging, release documents, and beta acceptance hardening.
 
 ## What It Does
 
@@ -21,13 +21,15 @@ Implemented on `main`:
 - `M2`: local collector pipeline, JSONL parsing, Codex state SQLite reading, quota snapshot refresh.
 - `M3`: estimated credits, quota alert policy, notifications, recommendation engine.
 - `M4`: account metadata expansion, Keychain storage, switch preflight, switch state machine, switch events, user-confirmed switch flow, account add/edit form.
+- `M5`: usage detail filters, CSV/JSON export, audit filters, local cleanup workflow, sanitized diagnostics export.
 
 Not implemented yet:
 
 - Silent or background automatic account rotation.
 - Reading, copying, replacing, exporting, or syncing `~/.codex/auth.json`.
 - Centralized dashboard, enterprise control plane, or multi-device aggregation.
-- Full `M5` export, cleanup, diagnostics, and management window completion.
+- Release packaging, notarization, and `.dmg` distribution.
+- Full `PRIVACY`, `SECURITY`, `CONTRIBUTING`, and release-note hardening.
 
 ## Run Locally
 
@@ -77,7 +79,7 @@ env CLANG_MODULE_CACHE_PATH=/tmp/codex-switchboard-clang-module-cache \
 Current local verification baseline:
 
 - `swift build` passes
-- `swift test` passes with 41 tests
+- `swift test` passes with 47 tests
 
 ## How To Use
 
@@ -112,9 +114,12 @@ Current local verification baseline:
 - [DEV-001](/Users/fengjie/Documents/CodeX/codex-switchboard/docs/05-development-plan/DEV-001-mvp-task-breakdown.md)
 - [REQ-001](/Users/fengjie/Documents/CodeX/codex-switchboard/docs/02-requirements/REQ-001-codex-multi-account-quota-management.md)
 - [PRD-001](/Users/fengjie/Documents/CodeX/codex-switchboard/docs/03-product-design/PRD-001-product-design-overview.md)
+- [PRIVACY.md](/Users/fengjie/Documents/CodeX/codex-switchboard/PRIVACY.md)
+- [SECURITY.md](/Users/fengjie/Documents/CodeX/codex-switchboard/SECURITY.md)
+- [CONTRIBUTING.md](/Users/fengjie/Documents/CodeX/codex-switchboard/CONTRIBUTING.md)
 
 ## Known Limits
 
 - The app can assist switching, but it cannot prove account identity through unofficial credential inspection.
 - Post-switch verification currently relies on official flow completion plus refreshed observed snapshots.
-- The management window is functional for `M4`, but `M5` is still needed for export, cleanup, and fuller operational workflows.
+- Packaging, notarization, and release artifacts are not finished yet.
