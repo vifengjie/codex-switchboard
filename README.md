@@ -2,32 +2,63 @@
 
 Codex Quota Manager is a macOS menu bar app for local Codex quota visibility, token usage review, low-quota alerts, and user-confirmed account switching.
 
-This repository is currently in the M4 multi-account and user-confirmed switching slice.
+The repository is currently in the `M4` multi-account and switching workflow slice. `M1` to `M4` are implemented locally on `main`; `M5` will focus on management window hardening, export, cleanup, and richer audit/detail workflows.
 
-## Development
+## What It Does
+
+- Shows current Codex `5H` and `1W` remaining quota in the macOS menu bar.
+- Parses local Codex JSONL logs and state SQLite data without copying chat or code content.
+- Tracks token usage, estimated credits, quota snapshots, settings, and audit events in local SQLite.
+- Supports multi-account metadata, enable/disable, priority, authorization state, and Keychain-backed secret references.
+- Provides a user-confirmed switching workflow:
+  open official login or account-selection flow, wait for user confirmation, refresh the target account snapshot, and audit the result.
+
+## Current Scope
+
+Implemented on `main`:
+
+- `M1`: local storage bootstrap, menu bar scaffold, management window skeleton, settings persistence.
+- `M2`: local collector pipeline, JSONL parsing, Codex state SQLite reading, quota snapshot refresh.
+- `M3`: estimated credits, quota alert policy, notifications, recommendation engine.
+- `M4`: account metadata expansion, Keychain storage, switch preflight, switch state machine, switch events, user-confirmed switch flow, account add/edit form.
+
+Not implemented yet:
+
+- Silent or background automatic account rotation.
+- Reading, copying, replacing, exporting, or syncing `~/.codex/auth.json`.
+- Centralized dashboard, enterprise control plane, or multi-device aggregation.
+- Full `M5` export, cleanup, diagnostics, and management window completion.
+
+## Run Locally
 
 Requirements:
 
 - macOS
 - Swift 6.1 or newer
-- Full Xcode is recommended for App packaging. Swift Package build and tests can run with Command Line Tools.
+- Full Xcode is recommended for app packaging; SwiftPM build and test can run with Command Line Tools
 
-Run tests:
-
-```bash
-swift test
-```
-
-Build the scaffold:
+Build:
 
 ```bash
 swift build
 ```
 
-Run the menu bar scaffold:
+Test:
+
+```bash
+swift test
+```
+
+Run the menu bar app:
 
 ```bash
 swift run CodexQuotaManager
+```
+
+If you are not already in the repo directory:
+
+```bash
+swift run --package-path /Users/fengjie/Documents/CodeX/codex-switchboard CodexQuotaManager
 ```
 
 In restricted local environments, SwiftPM may need writable cache paths:
@@ -43,53 +74,47 @@ env CLANG_MODULE_CACHE_PATH=/tmp/codex-switchboard-clang-module-cache \
   --manifest-cache local
 ```
 
-Current scaffold status:
+Current local verification baseline:
 
-- Full Xcode is selected.
-- `swift build` passes.
-- `swift test` passes with 41 tests.
-- The menu bar app loads its startup state from SQLite-backed settings and quota snapshot repositories.
+- `swift build` passes
+- `swift test` passes with 41 tests
 
-Check whether the workspace is ready to enter M1:
+## How To Use
 
-```bash
-bash tools/check_m1_readiness.sh
-```
+1. Start the app with `swift run CodexQuotaManager`.
+2. Find the `Cdx ...` status item in the macOS menu bar.
+3. Open the management window from the menu bar menu.
+4. In the `账号` tab, add or edit account metadata.
+5. Use `切换` to enter the user-confirmed switch flow:
+   the app runs preflight checks, opens the official login or account-selection flow, waits for your confirmation, then refreshes the target snapshot and writes audit records.
 
-The script requires full Xcode. If it reports that Command Line Tools are active, install Xcode and run:
+## Storage And Privacy
 
-```bash
-sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-```
+- SQLite path:
+  `~/Library/Application Support/Codex Quota Manager/quota-manager.sqlite`
+- Sensitive secrets are stored in macOS Keychain, not in SQLite.
+- The app is local-first and does not upload telemetry by default.
+- The app must not copy, export, or upload OAuth tokens, cookies, `~/.codex/auth.json`, chat content, code content, or private repository contents.
 
-## Current MVP Slice
+## Project Structure
 
-Implemented:
+- [App](/Users/fengjie/Documents/CodeX/codex-switchboard/App): menu bar app, management window, notifications, local refresh service
+- [Sources/Core](/Users/fengjie/Documents/CodeX/codex-switchboard/Sources/Core): models, quota engine, rate card, policy, recommendation
+- [Sources/Collectors](/Users/fengjie/Documents/CodeX/codex-switchboard/Sources/Collectors): local JSONL and Codex state collectors
+- [Sources/Storage](/Users/fengjie/Documents/CodeX/codex-switchboard/Sources/Storage): SQLite store, repositories, Keychain store
+- [Sources/Switch](/Users/fengjie/Documents/CodeX/codex-switchboard/Sources/Switch): switch provider abstraction and switch coordinator
+- [Tests](/Users/fengjie/Documents/CodeX/codex-switchboard/Tests): core, collector, storage, and switch tests
+- [docs](/Users/fengjie/Documents/CodeX/codex-switchboard/docs): requirements, PRD, technical solution, and development plan
 
-- SQLite migration for `app_settings`, `quota_snapshots`, and `schema_migrations`.
-- SQLite migration for `accounts`.
-- SQLite migration for `audit_events`.
-- SQLite migration for `usage_events`.
-- `SQLiteSettingsRepository` with default settings bootstrap.
-- `SQLiteSnapshotRepository` with latest snapshot read/write.
-- `SQLiteAccountRepository` with account list, upsert, lookup, and delete.
-- `SQLiteAuditRepository` with audit record and recent event lookup.
-- `SQLiteUsageEventRepository` with usage event upsert and recent event lookup.
-- App startup storage bootstrap under `~/Library/Application Support/Codex Quota Manager/quota-manager.sqlite`.
-- Menu bar unconfigured state: `Cdx 未设置`.
-- Management window overview, accounts, and policy tabs are wired to SQLite-backed data.
-- Management window audit tab shows local audit events.
-- Management window details tab shows local usage events.
-- Account add, enable/disable, and delete actions write audit events.
-- Policy settings are editable and persisted to SQLite.
-- Policy save actions write `settings_update` audit events.
-- M4 account metadata fields: provider, seat type, auth method, Keychain reference, and last switched time.
-- `KeychainStore` stores, reads, and deletes secrets via macOS Keychain; SQLite stores only the non-secret reference.
-- SQLite migration for `switch_events`.
-- `CodexQuotaSwitch` module with `AccountManager`, `OfficialLoginSwitchProvider`, and `SwitchCoordinator`.
-- User-confirmed switching flow in the management window: preflight, confirmation, official login launch, manual completion, forced refresh, switch events, and audit events.
-- Refresh failure after user-confirmed switching records `stale_succeeded` and saves a stale snapshot for the target account.
+## Key Docs
 
-## Privacy Boundary
+- [TECH-001](/Users/fengjie/Documents/CodeX/codex-switchboard/docs/04-technical-solution/TECH-001-architecture-and-implementation-options.md)
+- [DEV-001](/Users/fengjie/Documents/CodeX/codex-switchboard/docs/05-development-plan/DEV-001-mvp-task-breakdown.md)
+- [REQ-001](/Users/fengjie/Documents/CodeX/codex-switchboard/docs/02-requirements/REQ-001-codex-multi-account-quota-management.md)
+- [PRD-001](/Users/fengjie/Documents/CodeX/codex-switchboard/docs/03-product-design/PRD-001-product-design-overview.md)
 
-The MVP is designed as a local-first app. It must not copy, export, or upload OAuth tokens, cookies, `~/.codex/auth.json`, chat content, code content, or private repository contents.
+## Known Limits
+
+- The app can assist switching, but it cannot prove account identity through unofficial credential inspection.
+- Post-switch verification currently relies on official flow completion plus refreshed observed snapshots.
+- The management window is functional for `M4`, but `M5` is still needed for export, cleanup, and fuller operational workflows.
