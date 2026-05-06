@@ -20,6 +20,20 @@ struct QuotaNotificationCoordinator {
                 return
             }
 
+            guard notificationsAreAvailableInCurrentProcess() else {
+                try repository.record(
+                    AlertEvent(
+                        alertType: request.status,
+                        accountAlias: snapshot.accountAlias,
+                        dedupeKey: request.dedupeKey,
+                        snapshotCapturedAt: snapshot.capturedAt,
+                        result: .failed,
+                        message: "notifications unavailable in non-bundled run"
+                    )
+                )
+                return
+            }
+
             let authorized = await requestAuthorization()
             guard authorized else {
                 try repository.record(
@@ -50,6 +64,11 @@ struct QuotaNotificationCoordinator {
         } catch {
             NSLog("Codex Quota Manager notification failed: \(error)")
         }
+    }
+
+    private func notificationsAreAvailableInCurrentProcess() -> Bool {
+        let bundleURL = Bundle.main.bundleURL
+        return bundleURL.pathExtension == "app"
     }
 
     private func requestAuthorization() async -> Bool {
